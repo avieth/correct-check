@@ -17,6 +17,10 @@ module Space.Random
   , listOfLength
   , listOfKnownLength
 
+  -- * For searching through the random part of a space
+  , RandomPoints (..)
+  , randomPoints
+
   -- * Things to do with splitmix generators
   , Seed
   , newSeedIO
@@ -101,6 +105,25 @@ splitN n g = g NE.:| take (fromIntegral n) (splitUnfold g)
 -- | An infinite list of seeds derived via split from the given seed.
 splitUnfold :: Seed -> [Seed]
 splitUnfold = unfoldr (Just . SM.splitSMGen)
+
+-- | A list of seeds and its length, which can be useful to know.
+-- This should always be
+--
+--   count = n
+--   points = splitN n g
+--
+-- for some seed g.
+data RandomPoints = RandomPoints
+  { count :: Natural
+  , points :: NonEmpty Seed
+  }
+
+{-# INLINE CONLIKE randomPoints #-}
+randomPoints :: Natural -> Seed -> RandomPoints
+randomPoints n g = RandomPoints
+  { count = n + 1 -- Because splitN n gives n + 1 seeds.
+  , points = splitN n g
+  }
 
 {-# INLINE parameter #-}
 -- | 

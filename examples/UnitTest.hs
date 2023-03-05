@@ -23,94 +23,61 @@ unitTestDomain = Domain
   , generate = pure ()
   }
 
--- Running a unit test with the typical property test drivers will sample a
--- bunch of random seeds, which is wasteful, but it's reasonable to expect GHC
--- to be able to automatically simplify this to run the test subject and
--- exepctations only once.
+-- Running a unit test with a property test driver will sample a bunch of random
+-- seeds, which is wasteful, but it's reasonable to expect GHC to be able to
+-- automatically simplify this to run the test subject and exepctations only once.
 --
 -- What's more, if the test passes, GHC ought to be able to figure out that the
--- entire list of seeds can be skipped, because this rewrite rule is justified:
+-- entire list of seeds can be thrown out. There are rewrite RULES and INLINE
+-- directives in Space.Search which make this possible. And so this property
+-- testing framework can be used to express unit tests just as well, without any
+-- extra cost.
+
+-- This will simplify to Nothing, because `runStrategy` will be inlined and
+-- `pickFirstFailing (const Nothing)` will be rewritten to `Nothing`.
+shouldSimplify_0 :: Maybe ((), (), Int)
+shouldSimplify_0 = runStrategy unitSearchStrategy () () (const Nothing)
+
+-- This will simplify to `Just ((), (), 42)`, but is slightly more involved than
+-- 'shouldSimplify_0': `runStrategy` will inline to a term involving
 --
---     mapMaybe (const r) lst
---   = case r of
---       Nothing -> []
---       Just t -> fmap (const t) lst
+--   pickFirstFailing (const (Just 42)) ((state, space):_)
 --
--- or another way
---
---     mapMaybe (const r) xs = maybe [] (flip fmap xs . const) r
---
--- Making this actually happen will probably require more work.
+-- which GHC is able to rewrite to `Just (state, space, 42)`.
+shouldSimplify_1 :: Maybe ((), (), Int)
+shouldSimplify_1 = runStrategy unitSearchStrategy () () (const (Just 42))
+
+-- 'searchSequential' will use 'runStrategy', which we know will simplify for
+-- constant functions. Thanks to inlining, this term also simplifies to Nothing.
+shouldSimplify_2 :: Maybe (Seed, ((), (), Int))
+shouldSimplify_2 = searchSequential unitSearchStrategy () () (const (const Nothing)) (randomPoints 99 (mkSMGen 42))
+
+-- This one is trickier: it relies upon the fact that splitN gives a non-empty
+-- list, and so GHC will be able to inline a cons, which allows for a rewrite
+-- of `pickFirstFailing (const (Just r)) (x:_)` to `Just r`. If the list were
+-- not known to be cons, then it would not be simplified.
+shouldSimplify_3 :: Maybe (Seed, ((), (), Int))
+shouldSimplify_3 = searchSequential unitSearchStrategy () () (const (const (Just 42))) (randomPoints 99 (mkSMGen 42))
+
+-- The transformation also works for parallel search.
+shouldSimplify_4 :: Maybe (Seed, ((), (), Int))
+shouldSimplify_4 = searchParallel 2 unitSearchStrategy () () (const (const Nothing)) (randomPoints 99 (mkSMGen 42))
+
+shouldSimplify_5 :: Maybe (Seed, ((), (), Int))
+shouldSimplify_5 = searchParallel 2 unitSearchStrategy () () (const (const (Just 42))) (randomPoints 99 (mkSMGen 42))
 
   {-
--- This will simplify, via the rewrite rule pickFirstFailingConstNothing2, to
--- Nothing.
-shouldSimplify_1 :: Maybe ((), (), String)
-shouldSimplify_1 = pickFirstFailing (const Nothing) (complicateBreadthFirst (complicate unitSearchStrategy) () ())
+-- shouldSimplify_6 :: Seed -> Maybe (Seed, ((), (), Int))
+-- shouldSimplify_6 seed = searchSequential unitSearchStrategy () () (const (const Nothing)) (randomPoints 99 seed)
 
--- Want this to simplify to only run the function once.
+-- TODO now try it on checkSequential and checkParallel. They should also
+-- simplify just like the searches.
 --
-shouldSimplify_2 :: Maybe ((), (), String)
-shouldSimplify_2 = pickFirstFailing (const (Just "blargh")) (complicateBreadthFirst (complicate unitSearchStrategy) () ())
--}
-
--- This simplifies thanks to pickFirstFailingConstNothing2. runStrategy is
--- inlined, its failingPoint becomes Nothing, and then fmap of simplifications
--- over Nothing is simplified to Nothing.
-shouldSimplify_3 :: Maybe ((), (), Int)
-shouldSimplify_3 = runStrategy unitSearchStrategy () () (const Nothing)
-
--- In case we have a const Just form, meaning the test always fails in the same
--- way, not depending on the space, then GHC _should_ be able to eliminate the
--- complicateBreadthFirst list: we aleady have the space at which to run the
--- predicate, which we know is Just, and we have the search state as well... so
--- we should be able to rewrite
+-- To do this, we'll need a unit test property.
 --
---     pickFirstFailing (const (Just 42)) whatever
---   = Just ((), (), 42)
---
--- and then we would have
---
---   fmap (simplifyDepthFirst (const (const [])) (const (Just 42))) (Just ((), (), 42))
---
--- which, given the (const (const [])) simplification, should rewrite to
---
---   fmap id (Just ((), (), 42)) = Just ((), (), 42)
---
-shouldSimplify_4 :: Maybe ((), (), Int)
-shouldSimplify_4 = runStrategy unitSearchStrategy () () (const (Just 42))
-
--- Goal for this one: simplifies to Nothing, just like shouldSimplify_3.
-shouldSimplify_5 :: Maybe (Seed, (), (), Int)
-shouldSimplify_5 = searchSequential_ unitSearchStrategy () () (const (const Nothing)) (splitN 100 (mkSMGen 42))
-
--- Goal for this one: simplifies to the first seed.
--- This won't simplify unless we show GHC that the list is definitely a cons.
--- It won't figure that out on its own.
--- - If GHC knows the list is empty then it will simplify to Nothing
--- - If GHC knows the list is cons then it will simplify if the test is const Just
--- - If GHC knows the test is const Nothing then it will simplify.
--- What's the missing link? If it's const Just, but GHC can't determine the head
--- of the list statically, then it of course can't rewrite it, and will have to
--- generate code to compute the head.
---
--- So what to do about this? It's nice to be able to give any [Seed] to the
--- search. One solution would be to export a splitN which GHC _can_ inline to
--- a cons.
-shouldSimplify_6 :: Maybe (Seed, (), (), Int)
-shouldSimplify_6 = searchSequential_ unitSearchStrategy () () (const (const (Just 42))) (splitN 99 (mkSMGen 42))
--- Does not simplify
---   shouldSimplify_6 = searchSequential_ unitSearchStrategy () () (const (const (Just 42))) (take 100 (splitUnfold (mkSMGen 42)))
--- Does simplify
---   shouldSimplify_6 = searchSequential_ unitSearchStrategy () () (const (const (Just 42))) (mkSMGen 42 : take 99 (splitUnfold (mkSMGen 43)))
--- Does simplify
---   shouldSimplify_6 = searchSequential_ unitSearchStrategy () () (const (const (Just 42))) []
-
--- Let's put it all together into a quickCheck of the following unit test.
---
--- It checks that the sum of 1 to n is n*(n+1)/2, but only at a single given
--- number. It doesn't use any randomness, and the search space is the unit
--- space, so it's a unit test.
+-- Here's one: it checks that the sum of 1 to n is n*(n+1)/2, but only at a
+-- single given number. It doesn't use any randomness, and the search space is
+-- the unit space, so it's a unit test.
 --
 -- To make things interesting, we'll put a trace in the subject function. If
 -- things are working properly, then a quickCheck of this property should
@@ -125,5 +92,80 @@ exampleUnitTest = Property
       }
   }
 
--- main :: IO ()
--- main = quickCheck 100 (2*4096) exampleUnitTest >>= print
+-- What we can hope for here is that GHC will float out the evaluation of the
+-- test, which only needs to happen once.
+--
+-- But it still won't know statically whether it's a Just or a Nothing, so
+-- can we expect a rewrite? We'll get a form that looks like
+--
+--   let result = floatedUnitTestResult
+--       ...
+--    in mapMaybe (\s -> fmap ((,) s) result) xs
+--
+-- which should rewrite to
+--
+--   case result of
+--     Nothing -> const Nothing
+--     Just r -> \xs -> case xs of
+--       [] -> Nothing
+--       (x:xs) -> Just (s, r)
+--
+-- and that would fuse the list away.
+--
+-- Should define our own mapMaybe variant
+--
+--   mapMaybeWithPoint :: (a -> Maybe b) -> [a] -> [(a, b)]
+--
+-- with rewrite rule
+--
+--   mapMaybeWithPoint (\_ -> r) xs = case r of
+--     Nothing -> []
+--     Just t -> fmap (flip (,) t) xs
+--
+-- and then rely upon headOfList inlining on this to simplify further to
+--
+--   headOfList (mapMaybeWithPoint (\_ -> r) xs) = case r of
+--     Nothing -> Nothing
+--     Just t -> case xs of
+--       [] -> Nothing 
+--       (x:_) -> flip (,) t x
+--
+--
+-- Should work!
+-- So that's the cool thing: the rewrite rules previously discussed would only
+-- work if you actually wrote out a statically constant unit test. But if you
+-- write a unit test that actually does need to compute something, GHC can still
+-- fuse away the random sampling part and skip it.
+shouldSimplify_7 :: Maybe (Counterexample () () String)
+shouldSimplify_7 = checkSequential 100 (randomPoints 99 (mkSMGen 42)) exampleUnitTest
+
+{-
+
+
+
+exampleNonUnitTest :: Property () Natural Natural Natural String ()
+exampleNonUnitTest = Property
+  { domain = Domain
+      { search = Search
+          { strategy = hedgehogSearchStrategy
+          , initialState = ()
+          , minimalSpace = 0
+          }
+      , generate = do
+          w8 <- genWord8
+          n <- parameter
+          pure (fromIntegral w8 + n)
+      }
+  , test = Test
+      { subject = Subject $ \_ n -> sum [1..n]
+      , expectations = assert $ that "Gauss was right" $ \_ n s -> s == n * (n + 1) `div` 2
+      }
+  }
+-}
+
+--main :: IO ()
+-- main = checkSequential 100 (randomPoints 99 seed) exampleUnitTest
+--main = quickCheck 100 (2*4096) exampleUnitTest >>= print
+--main = quickCheckParallel () 8 (2*4096) exampleNonUnitTest >>= print
+-- main = quickCheck () (2*4096) exampleNonUnitTest >>= print
+-}

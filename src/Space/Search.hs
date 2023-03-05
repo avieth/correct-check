@@ -1,19 +1,19 @@
 module Space.Search
-  ( Strategy (..)
+  (
+  -- * Searching a space at a particular random point.
+    Strategy (..)
+  , runStrategy
+
+  -- * Searching over multiple random points.
+  , searchSequential
+  , searchSequentialAll
+  , searchParallel
+  , searchParallelAll
+
+  -- * Various search strategies
   , unitSearchStrategy
   , hedgehogSearchStrategy
   , twoDimensionalSearchStrategy
-
-  , pickFailing
-  , pickFirstFailing
-  , complicateBreadthFirst
-  , simplifyDepthFirst
-  , runStrategy
-
-  -- * Searching a space using a strategy
-  , searchSequential
-  , searchSequential_
-  , searchParallel
   ) where
 
 import Control.Monad (guard)
@@ -25,7 +25,7 @@ import qualified Data.Maybe (mapMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Numeric.Natural (Natural)
-import Space.Random
+import Space.Random as Random
 
 -- | Defines how to search an ordered space.
 --
@@ -89,41 +89,6 @@ twoDimensionalSearchStrategy upperBound = Strategy
       , (n, m+1)
       ]
 
--- TODO
--- would it be possible to rework this definition so that if it's called
--- with a p that doesn't use its argument, then GHC will rewrite it to
--- immediately shrink to the minimal space?
---
---     runStrategcy strat state space (const r)
---   = case r of
---       Nothing -> Nothing
---       Just failure -> simplifyPhase state space failure
---
--- and then furthermore, if the simplification is const (const []) then
--- it gets rewritten to Just (state, space, failure) ?
---
--- Can we make a function which will 
-
-{-# RULES
-"mapMaybeConstNothing1" mapMaybe (\_ -> Nothing) = const []
-"mapMaybeConstNothing2" forall xs . mapMaybe (\_ -> Nothing) xs = []
-
-"mapMaybeConstJust1" forall r . mapMaybe (\_ -> Just r) = fmap (const r)
-"mapMaybeConstJust2" forall r xs . mapMaybe (\_ -> Just r) xs = fmap (const r) xs
-
-"mapMaybeConst" forall r xs . mapMaybe (\_ -> r) xs = maybe [] (flip fmap xs . const) r
-
-"pickFailingConstNothing1" pickFailing (\_ -> Nothing) = const Nothing
-"pickFailingConstNothing2" forall x . pickFailing (\_ -> Nothing) x = Nothing
-
-"pickFailingConstJust1" forall r . pickFailing (\_ -> Just r) = Just . makeTriple r
-"pickFailingConstJust2" forall r x . pickFailing (\_ -> Just r) x = Just (makeTriple r x)
-
-"pickFirstFailingConstNothing1" pickFirstFailing (\_ -> Nothing) = const Nothing
-"pickFirstFailingConstNothing2" forall x . pickFirstFailing (\_ -> Nothing) x = Nothing
-
-"pickFirstFailingConstJust" forall r x xs . pickFirstFailing (\_ -> Just r) (x:xs) = Just (makeTriple r x)
-#-}
 
 -- No rule for pickFirstFailing (\_ -> Just r) because we ought to be able to
 -- let that inline to headOfList . mapMaybe (pickFailing (\_ -> Just r)) and
@@ -166,6 +131,11 @@ pickFailing :: (space -> Maybe failure) -> (state, space) -> Maybe (state, space
 pickFailing p x = do
   y <- p (snd x)
   pure (fst x, snd x, y)
+
+{-# INLINE pickFailingWithSeed #-}
+pickFailingWithSeed :: (Seed, Maybe (state, space, failure)) -> Maybe (Seed, state, space, failure)
+pickFailingWithSeed (_seed, Nothing) = Nothing
+pickFailingWithSeed (seed, Just (state, space, failure)) = Just (seed, state, space, failure)
 
 -- INLINE phase 2 or later, so that we give the RULES a chance to fire.
 {-# INLINE [2] pickFirstFailing #-}
@@ -242,81 +212,100 @@ simplifyDepthFirst simplify p = goSimplify
       Nothing -> (state, space, failure)
       Just simplified -> goSimplify simplified
 
-{-# INLINE searchSequential #-}
--- | Uses 'searchSpace' at each seed.
-searchSequential :: forall state space failure .
-                    Strategy state space
-                 -> state
-                 -> space
-                 -> (Seed -> space -> Maybe failure)
-                 -> NonEmpty Seed
-                 -> [(Seed, state, space, failure)]
-searchSequential strategy initialState startSpace p = mapMaybe (pickFailing . searchOne) . NE.toList
-  where
-    -- TODO investigate whether we can re-work this so that, if p does not use
-    -- either of its parameters, then it could be rewritten to evaluate p only
-    -- once: float it out, and then case match on it
-    --
-    --   Nothing -> []
-    --   Just failure -> fmap (\(seed, state, space) -> (seed, state, space, failure)) lst
-    --
-    -- Would this require inlining/rewriting on the search strategy as well? I
-    -- believe it would.
-    --
-    searchOne :: Seed -> (Seed, Maybe (state, space, failure))
-    searchOne seed = (seed, runStrategy strategy initialState startSpace (p seed))
-    pickFailing :: (Seed, Maybe (state, space, failure)) -> Maybe (Seed, state, space, failure)
-    pickFailing (seed, check) = fmap (\(state, space, failure) -> (seed, state, space, failure)) check
+-- | Used in the definition of sequential and parallel search. Searches the
+-- space at this particular seed.
+{-# INLINE searchOne #-}
+searchOne :: Strategy state space
+          -> state
+          -> space
+          -> (Seed -> space -> Maybe failure)
+          -> Seed
+          -> (Seed, Maybe (state, space, failure))
+searchOne strategy state space p seed = (seed, runStrategy strategy state space (p seed))
 
-{-# INLINE searchSequential_ #-}
--- | Uses 'searchSpace' at each seed, but only giving the _first_ minimal
--- failing case (so not every Seed is necessarily used).
-searchSequential_ :: forall state space failure .
+-- | Used in 'searchSequentialAll' and 'searchParallelAll' as an argument to
+-- 'mapMaybe' or 'mapMaybeParallel'. It's important that this function inlines
+-- well, to allow for rewrite rules.
+{-# INLINE searchFunction #-}
+  {-
+searchFunction :: Strategy state space -> state -> space -> (Seed -> space -> Maybe failure) -> Seed -> Maybe (Seed, state, space, failure)
+searchFunction strategy initialState startSpace p = pickFailingWithSeed . searchOne strategy initialState startSpace p
+--searchFunction strategy state space p seed = case runStrategy strategy state space (p seed) of
+--  Nothing -> Nothing
+--  Just (state, space, failure) -> Just (seed, state, space, failure)
+-}
+searchFunction :: Strategy state space -> state -> space -> (Seed -> space -> Maybe failure) -> Seed -> Maybe (Seed, (state, space, failure))
+searchFunction strategy state space p = withPoint (runStrategy strategy state space . p)
+
+{-# INLINE searchSequentialAll #-}
+-- | Uses 'searchSpace' at each seed. For those which have a failing example,
+-- the minimal space is given along with its search state.
+searchSequentialAll :: forall state space failure .
+                       Strategy state space
+                    -> state
+                    -> space
+                    -> (Seed -> space -> Maybe failure)
+                    -> RandomPoints
+                    -> [(Seed, (state, space, failure))]
+searchSequentialAll strategy initialState startSpace p =
+    mapMaybe (searchFunction strategy initialState startSpace p)
+  . NE.toList
+  . Random.points
+  where
+
+{-# INLINE searchSequential #-}
+-- | 'searchSequentialAll' but takes the first failing case.
+searchSequential :: forall state space failure .
                      Strategy state space
                   -> state
                   -> space
                   -> (Seed -> space -> Maybe failure)
-                  -> NonEmpty Seed
-                  -> Maybe (Seed, state, space, failure)
-searchSequential_ strategy initialState startSpace p = headOfList . searchSequential strategy initialState startSpace p
+                  -> RandomPoints
+                  -> Maybe (Seed, (state, space, failure))
+searchSequential strategy initialState startSpace p =
+  headOfList . searchSequentialAll strategy initialState startSpace p
+
+{-# INLINE searchParallelAll #-}
+-- | Will search at every seed, using parListChunk with a given chunk size.
+--
+-- There is no parallelism at each random point: complicating and simplifying
+-- phases are all sequential.
+searchParallelAll :: forall state space failure .
+                     Natural -- ^ How much parallelism
+                  -> Strategy state space
+                  -> state
+                  -> space
+                  -> (Seed -> space -> Maybe failure)
+                  -> RandomPoints
+                  -> [(Seed, (state, space, failure))]
+searchParallelAll parallelism strategy initialState startSpace p rpoints =
+  mapMaybeParallel (searchFunction strategy initialState startSpace p) parallelism (Random.count rpoints) pstrat (NE.toList (Random.points rpoints))
+  where
+    -- Evaluation strategy for each element? We only need to figure out whether
+    -- it's Just or Nothing, and that's done by mapMaybeParallel.
+    -- No need to necessarily do the work of evalauting the entire space or
+    -- search state (although they will probably be forced anyway).
+    pstrat :: Parallel.Strategy (Seed, (state, space, failure))
+    pstrat = Parallel.r0
 
 {-# INLINE searchParallel #-}
--- | Will search at every seed, using parListChunk with a given chunk size.
--- The result is a list rather than a Maybe, because there's no sense only
--- taking one of the results if we're going to evaluate them all in parallel.
+-- | 'searchParallelAll' but takes the first failing case.
+--
+-- In the common case where the test is passing, this is likely to be faster
+-- than 'searchSequential'. In case the test is failing, then it could be said
+-- that some work is wasted by discarding all but the first case (in the order
+-- of the seed list), but that's okay, since we can still expect that answer to
+-- be found faster than it would have been by 'searchSequential'.
 searchParallel :: forall state space failure .
-                  Strategy state space
+                  Natural -- ^ How much parallelism
+               -> Strategy state space
                -> state
                -> space
                -> (Seed -> space -> Maybe failure)
-               -> Natural -- ^ Parallel chunk size.
-               -> [Seed]
-               -> [(Seed, state, space, failure)]
-searchParallel searchDefn initialState startSpace p chunkSize seeds =
-    mapMaybe pickFailing (Parallel.withStrategy strategyAll (fmap searchOne seeds))
-
-  where
-
-    -- TODO should we try to shrink in parallel too? Probably not worth it.
-
-    pickFailing :: (Seed, Maybe (state, space, failure)) -> Maybe (Seed, state, space, failure)
-    pickFailing (_seed, Nothing) = Nothing
-    pickFailing (seed, Just (state, space, failure)) = Just (seed, state, space, failure)
-
-    searchOne :: Seed -> (Seed, Maybe (state, space, failure))
-    searchOne seed = (seed, runStrategy searchDefn initialState startSpace (p seed))
-
-    -- Evaluation strategy for each element? We only need to figure out whether
-    -- it's Just or Nothing. No need to necessarily do the work of evalauting
-    -- the entire space or search state (although they will probably be forced
-    -- anyway).
-    strategyOne :: Parallel.Strategy (Seed, Maybe (state, space, failure))
-    strategyOne (seed, mresult) = do
-      mresult' <- Parallel.rseq mresult
-      pure (seed, mresult')
-
-    strategyAll :: Parallel.Strategy [(Seed, Maybe (state, space, failure))]
-    strategyAll = Parallel.parListChunk (fromIntegral chunkSize) strategyOne
+               -> RandomPoints
+               -> Maybe (Seed, (state, space, failure))
+searchParallel parallelism strategy initialState startSpace p =
+  headOfList . searchParallelAll parallelism strategy initialState startSpace p
 
 {-# INLINE makeTriple #-}
 makeTriple :: c -> (a, b) -> (a, b, c)
@@ -329,9 +318,84 @@ headOfList (x:_) = Just x
 
 -- Used in the LHS of RULE definitions, so we don't want it inlined too soon.
 -- mapMaybe itself has a NOINLINE.
---
--- FIXME this probably isn't necessary. I don't think any mapMaybe rules are
--- actually needed... yet.
 {-# INLINE [2] mapMaybe #-}
 mapMaybe :: (a -> Maybe b) -> [a] -> [b]
 mapMaybe = Data.Maybe.mapMaybe
+
+{-# INLINE withPoint #-}
+withPoint :: (a -> Maybe b) -> (a -> Maybe (a,b))
+withPoint f a = (,) a <$> f a
+
+-- | First argument `n` is the amount of parallelism, second `l` is the length
+-- of the list.
+--
+-- If n is 0 or 1 then there's no parallelism. Otherwise we'll make exactly `n`
+-- calls to `rpar`. If the remainder `r` of `div l n` is not zero, then the
+-- first `r` batches will get one extra work item.
+--
+-- A strategy can be given for the thing inside the Maybe. The only evaluation
+-- that 'mapMaybeParallel' commits to is of course WHNF of the Maybe.
+{-# INLINE [2] mapMaybeParallel #-}
+mapMaybeParallel :: (a -> Maybe b) -> Natural -> Natural -> Parallel.Strategy b -> [a] -> [b]
+mapMaybeParallel p n l strat =
+  if n <= 1
+  then Data.Maybe.mapMaybe p
+  else mapMaybeParallelAt p (fromIntegral q) (fromIntegral r) strat
+  where
+    (q, r) = l `divMod` n
+
+{-# NOINLINE mapMaybeParallelAt #-}
+mapMaybeParallelAt :: (a -> Maybe b) -> Int -> Int -> Parallel.Strategy b -> [a] -> [b]
+mapMaybeParallelAt p quotient remainder strat lst = concat (Parallel.runEval (go remainder lst))
+  where
+    go r lst = do
+      let i = quotient + if r <= 0 then 0 else 1
+          (prefix, suffix) = splitAt i lst
+      -- evalList with the given strat will force the spine of the list and
+      -- therefore will accomplish the work that we wanted to do in parallel:
+      -- determining whether each element is Just or Nothing.
+      prefix' <- Parallel.rparWith (Parallel.evalList strat) (Data.Maybe.mapMaybe p prefix)
+      case suffix of
+        [] -> pure [prefix']
+        suffix@(_:_) -> do
+          suffix' <- go (if r <= 0 then 0 else r - 1) suffix
+          pure (prefix' : suffix')
+
+{-# RULES
+"mapMaybeConstNothing1" mapMaybe (\_ -> Nothing) = const []
+"mapMaybeConstNothing2" forall xs . mapMaybe (\_ -> Nothing) xs = []
+
+"mapMaybeConstJust1" forall r . mapMaybe (\_ -> Just r) = fmap (const r)
+"mapMaybeConstJust2" forall r xs . mapMaybe (\_ -> Just r) xs = fmap (const r) xs
+
+"mapMaybeConst" forall r xs . mapMaybe (\_ -> r) xs = maybe [] (flip fmap xs . const) r
+
+-- This is the one that actually fires for unit tests. If a const (const (Just x))
+-- test predicate is applied to a parallel or sequential search, what we end up
+-- with is a function of the form \s -> Just (s, x) where s is the random seed,
+-- and that is what we want to rewrite.
+"mapMaybeJust1" forall c . mapMaybe (\s -> Just (s, c)) = fmap (flip (,) c)
+
+"pickFailingConstNothing1" pickFailing (\_ -> Nothing) = const Nothing
+"pickFailingConstNothing2" forall x . pickFailing (\_ -> Nothing) x = Nothing
+
+"pickFailingConstJust1" forall r . pickFailing (\_ -> Just r) = Just . makeTriple r
+"pickFailingConstJust2" forall r x . pickFailing (\_ -> Just r) x = Just (makeTriple r x)
+
+"pickFirstFailingConstNothing1" pickFirstFailing (\_ -> Nothing) = const Nothing
+"pickFirstFailingConstNothing2" forall x . pickFirstFailing (\_ -> Nothing) x = Nothing
+
+"pickFirstFailingConstJust" forall r x xs . pickFirstFailing (\_ -> Just r) (x:xs) = Just (makeTriple r x)
+#-}
+
+{-# RULES
+"mapMaybeParallelAtConstNothing1" forall n l s . mapMaybeParallelAt (\_ -> Nothing) n l s = const []
+"mapMaybeParallelAtConstNothing2" forall n l s xs . mapMaybeParallelAt (\_ -> Nothing) n l s xs = []
+
+"mapMaybeParallelAtConstJust1" forall n l s r . mapMaybeParallelAt (\_ -> Just r) n l s = fmap (const r)
+"mapMaybeParallelAtConstJust2" forall n l s r xs . mapMaybeParallelAt (\_ -> Just r) n l s xs = fmap (const r) xs
+
+"mapMaybeParallelAtConst" forall n l s r xs . mapMaybeParallelAt (\_ -> r) n l s xs = maybe [] (flip fmap xs . const) r
+
+"mapMaybeParallelAtJust1" forall n l s c . mapMaybeParallelAt (\s -> Just (s, c)) n l s = fmap (flip (,) c)
+#-}
