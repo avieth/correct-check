@@ -1,4 +1,4 @@
--- module UnitTest where
+module UnitTest where
 
 import Data.Maybe (mapMaybe)
 import Driver
@@ -54,11 +54,11 @@ shouldSimplify_2 :: Maybe ((), (), String)
 shouldSimplify_2 = pickFirstFailing (const (Just "blargh")) (complicateBreadthFirst (complicate unitSearchStrategy) () ())
 -}
 
--- This simplifies thanks to pickFirstFailingConstNothing2. runStrategy' is
+-- This simplifies thanks to pickFirstFailingConstNothing2. runStrategy is
 -- inlined, its failingPoint becomes Nothing, and then fmap of simplifications
 -- over Nothing is simplified to Nothing.
 shouldSimplify_3 :: Maybe ((), (), Int)
-shouldSimplify_3 = runStrategy' unitSearchStrategy () () (const Nothing)
+shouldSimplify_3 = runStrategy unitSearchStrategy () () (const Nothing)
 
 -- In case we have a const Just form, meaning the test always fails in the same
 -- way, not depending on the space, then GHC _should_ be able to eliminate the
@@ -78,7 +78,7 @@ shouldSimplify_3 = runStrategy' unitSearchStrategy () () (const Nothing)
 --   fmap id (Just ((), (), 42)) = Just ((), (), 42)
 --
 shouldSimplify_4 :: Maybe ((), (), Int)
-shouldSimplify_4 = runStrategy' unitSearchStrategy () () (const (Just 42))
+shouldSimplify_4 = runStrategy unitSearchStrategy () () (const (Just 42))
 
 -- Goal for this one: simplifies to Nothing, just like shouldSimplify_3.
 shouldSimplify_5 :: Maybe (Seed, (), (), Int)
@@ -98,7 +98,7 @@ shouldSimplify_5 = searchSequential_ unitSearchStrategy () () (const (const Noth
 -- search. One solution would be to export a splitN which GHC _can_ inline to
 -- a cons.
 shouldSimplify_6 :: Maybe (Seed, (), (), Int)
-shouldSimplify_6 = searchSequential_ unitSearchStrategy () () (const (const (Just 42))) (splitN 100 (mkSMGen 42))
+shouldSimplify_6 = searchSequential_ unitSearchStrategy () () (const (const (Just 42))) (splitN 99 (mkSMGen 42))
 -- Does not simplify
 --   shouldSimplify_6 = searchSequential_ unitSearchStrategy () () (const (const (Just 42))) (take 100 (splitUnfold (mkSMGen 42)))
 -- Does simplify
@@ -125,5 +125,5 @@ exampleUnitTest = Property
       }
   }
 
-main :: IO ()
-main = quickCheck 100 (2*4096) exampleUnitTest >>= print
+-- main :: IO ()
+-- main = quickCheck 100 (2*4096) exampleUnitTest >>= print

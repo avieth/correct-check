@@ -81,7 +81,7 @@ prettyCounterexample :: Counterexample space dynamic refutation -> Text
 prettyCounterexample _ = mempty
 
 -- | Check the property at each of these seeds, giving all counterexamples.
-checkSequential :: t -> [Seed] -> Property state space dynamic result refutation t -> [Counterexample space dynamic refutation]
+checkSequential :: t -> NonEmpty Seed -> Property state space dynamic result refutation t -> [Counterexample space dynamic refutation]
 checkSequential t seeds prop = fmap toCounterexample results
   where
     dom = domain prop
@@ -95,7 +95,7 @@ checkSequential t seeds prop = fmap toCounterexample results
 {-# INLINE checkSequential_ #-}
 -- | Check the property at each of these seeds, stopping at the first
 -- counterexample.
-checkSequential_ :: t -> [Seed] -> Property state space dynamic result refutation t -> Maybe (Counterexample space dynamic refutation)
+checkSequential_ :: t -> NonEmpty Seed -> Property state space dynamic result refutation t -> Maybe (Counterexample space dynamic refutation)
 checkSequential_ t seeds prop = fmap toCounterexample results
   where
     dom = domain prop

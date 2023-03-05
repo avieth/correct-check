@@ -40,6 +40,8 @@ import Control.Monad (ap, replicateM)
 import Numeric (readHex, showHex)
 import Numeric.Natural (Natural)
 import Data.List (unfoldr)
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
 import Data.Word
 import System.Random.SplitMix (SMGen)
 import qualified System.Random.SplitMix as SM
@@ -92,8 +94,8 @@ split smgen k = let (g1, g2) = SM.splitSMGen smgen in k g1 g2
 -- 'searchSequential', for instance, is recommended, because GHC can inline the
 -- cons and drastically simplify tests which do not actually depend upon the
 -- random seed.
-splitN :: Natural -> Seed -> [Seed]
-splitN n g = g : take (fromIntegral n) (splitUnfold g)
+splitN :: Natural -> Seed -> NonEmpty Seed
+splitN n g = g NE.:| take (fromIntegral n) (splitUnfold g)
 
 {-# INLINE splitUnfold #-}
 -- | An infinite list of seeds derived via split from the given seed.

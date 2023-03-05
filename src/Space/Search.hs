@@ -8,7 +8,7 @@ module Space.Search
   , pickFirstFailing
   , complicateBreadthFirst
   , simplifyDepthFirst
-  , runStrategy'
+  , runStrategy
 
   -- * Searching a space using a strategy
   , searchSequential
@@ -16,9 +16,11 @@ module Space.Search
   , searchParallel
   ) where
 
-import Control.Monad ((>=>), guard)
+import Control.Monad (guard)
 import qualified Control.Parallel.Strategies as Parallel
 import Data.List (unfoldr)
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Maybe (mapMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -130,19 +132,19 @@ twoDimensionalSearchStrategy upperBound = Strategy
 -- There are no rewrite rules for unfoldr in its defining module.
 -- It does get INLINE though.
 
--- The idea would be that runStrategy' is inlined and then fires the
+-- The idea would be that runStrategy is inlined and then fires the
 -- mapMaybeConst rule.
 -- But to get that, we need to have the "compliacte-then-simplify" part also
 -- inline/simplify.
 -- Could we do that by having the BFS complicate phase expressed as an unfoldr?
-{-# INLINE runStrategy' #-}
-runStrategy' :: forall state space failure .
+{-# INLINE runStrategy #-}
+runStrategy :: forall state space failure .
                 Strategy state space
              -> state
              -> space
              -> (space -> Maybe failure)
              -> Maybe (state, space, failure)
-runStrategy' strategy state space p = fmap (simplifyDepthFirst (simplify strategy) p) failingPoint
+runStrategy strategy state space p = fmap (simplifyDepthFirst (simplify strategy) p) failingPoint
   where
     -- Always apply it to the given state and space directly, rather than by
     -- way of a list expression. Instead, complicateBreadthFirst gives the
@@ -240,64 +242,6 @@ simplifyDepthFirst simplify p = goSimplify
       Nothing -> (state, space, failure)
       Just simplified -> goSimplify simplified
 
--- | Tries to find a minimally-complex point in the space such that the function
--- gives Just. It will search "up" through the complications according to the
--- strategy, breadth-first, until either
--- - there are no more complications, according to the strategy
--- - a failing case is found and a depth-first search begins "down" through the
---   simplifications to find a minimal example
--- 
--- This searches locally, without randomess, but is used to define search
--- drivers that do use randomness, like 'searchParallel'.
-runStrategy :: forall state space failure .
-               Strategy state space
-            -> state
-            -> space
-            -> (space -> Maybe failure)
-            -> Maybe (state, space, failure)
-runStrategy searchDefn initialState startSpace p = fmap maybeSimplify failingCase
-
-  where
-
-    failingCase = complicatePhase (Seq.singleton (initialState, startSpace))
-
-    maybeSimplify (state, space, failure) = simplifyPhase state space failure
- 
-    -- TODO make it possible to opt-in to parallelism in the complication and
-    -- simplification phases? Worth it?
-
-    -- Uses a sequence as a queue so as to search breadth-first on increasing
-    -- complexity.
-    complicatePhase :: Seq (state, space) -> Maybe (state, space, failure)
-    complicatePhase bfsQueue = case bfsQueue of
-      Seq.Empty -> Nothing
-      (state, space) Seq.:<| bfsQueue -> case p space of
-        -- Found a failing case. We're done with the complicate phase. The rest
-        -- of the bfs search queue is discarded.
-        Just failure -> Just (state, space, failure)
-        -- No failing case here. Continue the search, including the complications
-        -- of this space.
-        Nothing -> complicatePhase (bfsQueue <> Seq.fromList (complicate searchDefn state space))
-
-    -- Always called at a failing space with the search state that made it.
-    simplifyPhase :: state -> space -> failure -> (state, space, failure)
-    simplifyPhase state space failure =
-      let simplifications = simplify searchDefn state space
-      -- Take the first simplification which still fails and then recurse on
-      -- that.
-      -- Another reasonable option would be to take _every_ simplification which
-      -- still fails and recurse on all of them, concatenating results, but it's
-      -- better to have one minimal failing example than a huge amount of them.
-       in takeFirstFailing (state, space, failure) simplifications
-
-    takeFirstFailing :: (state, space, failure) -> [(state, space)] -> (state, space, failure)
-    takeFirstFailing base [] = base
-    takeFirstFailing base ((state, space):others) = case p space of
-      -- This one didnt' fail, so we'll move on.
-      Nothing -> takeFirstFailing base others
-      -- Found one that did fail. We'll continue to simplify.
-      Just failure -> simplifyPhase state space failure
-
 {-# INLINE searchSequential #-}
 -- | Uses 'searchSpace' at each seed.
 searchSequential :: forall state space failure .
@@ -305,9 +249,9 @@ searchSequential :: forall state space failure .
                  -> state
                  -> space
                  -> (Seed -> space -> Maybe failure)
-                 -> [Seed]
+                 -> NonEmpty Seed
                  -> [(Seed, state, space, failure)]
-searchSequential strategy initialState startSpace p = mapMaybe (pickFailing . searchOne)
+searchSequential strategy initialState startSpace p = mapMaybe (pickFailing . searchOne) . NE.toList
   where
     -- TODO investigate whether we can re-work this so that, if p does not use
     -- either of its parameters, then it could be rewritten to evaluate p only
@@ -320,7 +264,7 @@ searchSequential strategy initialState startSpace p = mapMaybe (pickFailing . se
     -- believe it would.
     --
     searchOne :: Seed -> (Seed, Maybe (state, space, failure))
-    searchOne seed = (seed, runStrategy' strategy initialState startSpace (p seed))
+    searchOne seed = (seed, runStrategy strategy initialState startSpace (p seed))
     pickFailing :: (Seed, Maybe (state, space, failure)) -> Maybe (Seed, state, space, failure)
     pickFailing (seed, check) = fmap (\(state, space, failure) -> (seed, state, space, failure)) check
 
@@ -332,7 +276,7 @@ searchSequential_ :: forall state space failure .
                   -> state
                   -> space
                   -> (Seed -> space -> Maybe failure)
-                  -> [Seed]
+                  -> NonEmpty Seed
                   -> Maybe (Seed, state, space, failure)
 searchSequential_ strategy initialState startSpace p = headOfList . searchSequential strategy initialState startSpace p
 
