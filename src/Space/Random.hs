@@ -22,6 +22,7 @@ module Space.Random
   , newSeedIO
   , split
   , splitN
+  , splitUnfold
   , SM.mkSMGen
   , SM.newSMGen
 
@@ -82,10 +83,20 @@ split :: Seed -> (Seed -> Seed -> t) -> t
 split smgen k = let (g1, g2) = SM.splitSMGen smgen in k g1 g2
 
 {-# INLINE splitN #-}
+-- | Takes the first n seeds from the infinite list of splitUnfold.
+--
+-- The head of the list is the given seed, thus the resulting list is of length
+-- n+1.
+--
+-- Useful in conjunction with rewrite rules in 'Space.Search'. Applying this to
+-- 'searchSequential', for instance, is recommended, because GHC can inline the
+-- cons and drastically simplify tests which do not actually depend upon the
+-- random seed.
 splitN :: Natural -> Seed -> [Seed]
-splitN n = take (fromIntegral n) . splitUnfold
+splitN n g = g : take (fromIntegral n) (splitUnfold g)
 
 {-# INLINE splitUnfold #-}
+-- | An infinite list of seeds derived via split from the given seed.
 splitUnfold :: Seed -> [Seed]
 splitUnfold = unfoldr (Just . SM.splitSMGen)
 
