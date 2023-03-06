@@ -38,6 +38,8 @@ unitTestDomain = Domain
 -- Here are some blatantly obvious cases, in which GHC judged it can skip the
 -- entire search because the test case result is completely static.
 
+  {-
+
 -- This will simplify to Nothing, because `runStrategy` will be inlined and
 -- `pickFirstFailing (const Nothing)` will be rewritten to `Nothing`.
 shouldSimplify_0 :: Maybe ((), (), Int)
@@ -70,6 +72,7 @@ shouldSimplify_4 = searchParallel 2 unitSearchStrategy () () (const (const Nothi
 
 shouldSimplify_5 :: Maybe (Seed, ((), (), Int))
 shouldSimplify_5 = searchParallel 2 unitSearchStrategy () () (const (const (Just 42))) (randomPoints 99 (mkSMGen 42))
+-}
 
 -- Now for the more interesting cases of checkSequential and checkParallel on a
 -- somewhat less contrived example.
@@ -91,17 +94,22 @@ shouldSimplify_5 = searchParallel 2 unitSearchStrategy () () (const (const (Just
 exampleUnitTest :: Property () () () Int String Int
 exampleUnitTest = Property
   { domain = unitTestDomain
-  , test = Test
-      { subject = Subject $ \n _ -> Debug.trace ("Evaluating unit test at " ++ show n) (sum [1..n])
-      , expectations = that "Gauss was right" $ \n _ s -> s == n * (n + 1) `div` 2
-      }
+  , test = unitTestDefinition
   }
 
+unitTestDefinition :: Test () Int String Int
+unitTestDefinition = Test
+  { subject = Subject $ \n _ -> Debug.trace ("Evaluating unit test at " ++ show n) (sum [1..n])
+  , expectations = that "Gauss was right" $ \n _ s -> s == n * (n + 1) `div` 2
+  }
+
+  {-
 shouldMemoize_1 :: Maybe (Counterexample () () String)
 shouldMemoize_1 = checkSequential 100 (randomPoints 99 (mkSMGen 42)) exampleUnitTest
 
 shouldMemoize_2 :: Maybe (Counterexample () () String)
 shouldMemoize_2 = checkParallel 8 100 (randomPoints 99 (mkSMGen 43)) exampleUnitTest
+-}
 
 -- For contrast with the unit test, here's the same thing but the parameter
 -- comes is derived from the search space. There is no randomness, so a
@@ -141,35 +149,60 @@ exampleNonUnitTestWithRandomness trace = base
 
 main :: IO ()
 main = do
-  print shouldMemoize_1
+  -- Can we expect this to not force the entire list of seeds? Yes! Thanks
+  -- to the rewrite rules of headOfList applied to a mapMaybeWithPoint or
+  -- mapMaybeParallel on a constant function.
+  --print (searchSequential unitSearchStrategy () () (searchPredicate (pure ()) unitTestDefinition 100) (randomPoints 99 (mkSMGen 42)))
+  --print shouldMemoize_1
   -- This won't evaluate the subject again. In this case that's good, but in
   -- general could be bad, in case the unit test result is so big it could be
   -- considered a space leak.
-  print shouldMemoize_2
+  --print shouldMemoize_2
   -- Each of these will evaluate the unit test once, and immediately pass,
   -- without paying the cost of 2^64 tests.
-  quickCheck (2 ^ 64) 101 exampleUnitTest >>= print
+  --
+  -- FIXME in fact we find that GHC will float out the unit test evaluation, but
+  -- will still pay for the cost of the random seed list traversal
+  --  quickCheck 131070 100 exampleUnitTest >>= print
+  --  print (quickCheckAt 262140 100 exampleUnitTest (mkSMGen 42))
+  --  print (checkSequential 100 (randomPoints 262140 (mkSMGen 42)) exampleUnitTest)
   quickCheckParallel 8 (2 ^ 64) 102 exampleUnitTest >>= print
   -- This one will do a search, but only at one random point, since the
   -- generator doesn't use the random seed.
   quickCheck (2 ^ 64) () (exampleNonUnitTest Debug.trace) >>= print
   -- Can't give a big list here, because we're going to have to search everything.
-  quickCheckParallel 8 (2 ^ 16) () (exampleNonUnitTestWithRandomness (flip const)) >>= print
+  -- quickCheckParallel 8 (2 ^ 16) () (exampleNonUnitTestWithRandomness (flip const)) >>= print
 
   -- A unit test will still simplify within a composite test.
   Debug.traceM "Begin composite test"
   mvar <- newMVar ()
-  result <- composite $ declare exampleUnitTest $ \unitTest -> do
+  result <- composite $ declare exampleUnitTest noMetadata $ \unitTest -> do
     b <- check unitTest 142
+    -- For some reason, having a `() <-` can cause rewrite rules to not fire,
+    -- and the non-random test not to simplify enough.
+    --
+    -- It only happens if we write () literally. _ is fine, c is fine.
+    -- It's the thing on the RHS that doesn't get simplified.
+    --
+    -- This surely has something to do with some builtin GHC rule firing and
+    -- maybe causing GHC to not have any budget left to try our rules?
+    --
+    -- If we use 3 simplifier phases, it works.
     effect (putStrLn $ "Passed? " ++ show b)
     () <- assert unitTest 1042
+    check unitTest 142
     bracket (takeMVar mvar) (putMVar mvar) $ \_ -> do
       assert unitTest 142
     effect (putStrLn $ "Passed? " ++ show b)
     -- Why do we bother with composite/declare?
     -- After all, we can still run properties directly, and even via quickCheck
     -- because we can do IO for a new random seed.
-    effect (quickCheck (2 ^ 64) 200 exampleUnitTest >>= print)
+    --
+    -- Aside: even with -O0 GHC somehow figures out that it only needs to check
+    -- at one seed here.
+    -- effect (quickCheck (2 ^ 64) 200 exampleUnitTest >>= print)
+    effect (quickCheckParallel 8 (2 ^ 64) () (exampleNonUnitTest (Debug.trace)) >>= print)
+    effect (quickCheck (2 ^ 64) () (exampleNonUnitTestWithRandomness (Debug.trace)) >>= print)
     -- The point of composite/declare is to put a barrier between the properties
     -- that may be tested, and everything else. It ensures that the arbitrary IO
     -- in the composite cannot interact with the TVar CheckState.

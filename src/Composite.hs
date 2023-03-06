@@ -17,6 +17,7 @@ module Composite
   , showSummary
 
   , Metadata (..)
+  , noMetadata
   ) where
 
 import Control.Concurrent.STM hiding (check)
@@ -67,15 +68,24 @@ splitStateSeed tvar = do
 
 -- | Include a test counterexample in the state.
 {-# INLINE addCounterexample #-}
-addCounterexample :: TVar CheckState -> Counterexample space dynamic refutation -> STM ()
-addCounterexample tvar cx = do
+addCounterexample :: MaybeSrcLoc -- ^ Of declaration site
+                  -> MaybeSrcLoc -- ^ Of check site
+                  -> TVar CheckState
+                  -> Counterexample space dynamic refutation
+                  -> STM ()
+addCounterexample declSrcLoc checkSrcLoc tvar cx = do
   st <- readTVar tvar
   writeTVar tvar $! st { checkStateFailingTests = checkStateFailingTests st Seq.|> FailingCase cx }
 
 -- | Inlcude a test result. No change if it's a pass (Nothing).
 {-# INLINE addPropertyTestResult #-}
-addPropertyTestResult :: TVar CheckState -> Maybe (Counterexample space dynamic refutation) -> STM ()
-addPropertyTestResult tvar = maybe (pure ()) (addCounterexample tvar)
+addPropertyTestResult :: MaybeSrcLoc -- ^ Of declaration site
+                      -> MaybeSrcLoc -- ^ Of check site
+                      -> TVar CheckState
+                      -> Maybe (Counterexample space dynamic refutation)
+                      -> STM ()
+addPropertyTestResult declSrcLoc checkSrcLoc tvar =
+  maybe (pure ()) (addCounterexample declSrcLoc checkSrcLoc tvar)
 
 -- | Well get this as the result of a composite test run.
 --
@@ -116,60 +126,60 @@ showTestResult (Exceptional initialSeed finalState ex) = do
 -- given point. The check gives a bool saying whether it passed, which allows
 -- for a composite to choose to exit early.
 newtype Composite property t = Composite
-  { runComposite :: (forall x . property x -> x -> IO Bool) -> IO t }
+  { runComposite :: (forall x . MaybeSrcLoc -> property x -> x -> IO Bool) -> IO t }
 
 instance Functor (Composite property) where
-  {-# INLINE fmap #-}
   fmap f (Composite k) = Composite (\l -> fmap f (k l))
 
 instance Applicative (Composite property) where
-  {-# INLINE pure #-}
   pure x = Composite (\_ -> pure x)
   (<*>) = ap
 
 instance Monad (Composite property) where
   return = pure
-  {-# INLINE (>>=) #-}
   Composite left >>= k = Composite (\l -> left l >>= runCompositeAt l . k)
 
-{-# INLINE effect #-}
 effect :: IO t -> Composite property t
 effect io = Composite $ \_ -> io
 
-{-# INLINE bracket #-}
 bracket :: IO r -> (r -> IO ()) -> (r -> Composite property t) -> Composite property t
 bracket acquire release k = Composite $ \l -> Exception.bracket acquire release (runCompositeAt l . k)
+{-
+bracket acquire release k = Composite $ \l -> Exception.mask $ \restore -> do
+  r <- acquire
+  t <- restore (runComposite (k r) l) `Exception.onException` release r
+  release r
+  pure t
+-}
 
 -- TODO would probably want to give MonadIO and UnliftIO instances, for maximum
 -- compatibility.
 
 -- | Flipped 'runComposite'.
 {-# INLINE runCompositeAt #-}
-runCompositeAt :: (forall x . property x -> x -> IO Bool) -> Composite property t -> IO t
+runCompositeAt :: (forall x . MaybeSrcLoc -> property x -> x -> IO Bool) -> Composite property t -> IO t
 runCompositeAt k comp = runComposite comp k
 
 -- | The `property` parameter of 'Composite' will be instantiated to this in
 -- order to run a composite test.
-newtype Check t = Check (TVar CheckState -> t -> IO Bool)
+newtype Check t = Check (MaybeSrcLoc -> TVar CheckState -> t -> IO Bool)
 
 {-# INLINE runCompositeCheck #-}
 runCompositeCheck :: TVar CheckState -> Composite Check t -> IO t
-runCompositeCheck tvar (Composite k) = k (\(Check f) -> f tvar)
+runCompositeCheck tvar (Composite k) = k (\srcLoc (Check f) -> f srcLoc tvar)
 
 -- | This will check a property within a composite. It will force the evaluation
 -- of the property up to the determination of whether it passes or not.
-{-# INLINE check #-}
-check :: property x -> x -> Composite property Bool
-check prop x = Composite $ \k -> k prop x >>= evaluate
+check :: HasCallStack => property x -> x -> Composite property Bool
+check prop x = Composite $ \k -> k (srcLocOf callStack) prop x >>= evaluate
 -- TODO future direction here: take the SrcLoc of the check call, and pass
 -- it to the property evaluation function to allow for it to be stored in the
 -- test results.
 
 -- | 'check' but stops the test if it's a failure.
-{-# INLINE assert #-}
-assert :: property x -> x -> Composite property ()
+assert :: HasCallStack => property x -> x -> Composite property ()
 assert prop x = do
-  b <- check prop x
+  b <- withFrozenCallStack (check prop x)
   unless b stop
 
 -- TODO
@@ -181,14 +191,21 @@ assert prop x = do
 -- In this style of definition, that makes more sense anyway.
 newtype Declaration property = Declaration
   { runDeclaration :: forall r .
-         (forall state space dynamic result refutation t . Property state space dynamic result refutation t -> (property t -> Composite property ()) -> Composite property r)
+         (forall state space dynamic result refutation t . MaybeSrcLoc -> Property state space dynamic result refutation t -> Metadata state space dynamic result refutation t -> (property t -> Composite property ()) -> Composite property r)
       -> Composite property r
   }
 
+-- INLINE on declare and composite is very important. Without it, GHC won't
+-- optimize unit tests in composites.
+
 -- | Declare a property, to allow for its use in a composite.
 {-# INLINE declare #-}
-declare :: Property state space dynamic result refutation t -> (property t -> Composite property ()) -> Declaration property
-declare conj k = Declaration $ \f -> f conj k
+declare :: HasCallStack
+        => Property state space dynamic result refutation t
+        -> Metadata state space dynamic result refutation t
+        -> (property t -> Composite property ())
+        -> Declaration property
+declare prop meta k = Declaration $ \f -> f (srcLocOf callStack) prop meta k
 
 -- | Run a composite. Note the ST-style trick: only composites which do not
 -- know anythig about the `property` type may be run.
@@ -203,16 +220,29 @@ composite decl = do
     Left someException -> Exceptional initialSeed finalState someException
     Right () -> Normal initialSeed finalState
 
+-- | Gives the property, its metadata, and the source location of the
+-- declaration itself (populated by a call to 'declare'), run a check.
 {-# INLINE runDeclarationWith #-}
-runDeclarationWith :: Property state space dynamic result refutation t -> (Check t -> Composite Check ()) -> Composite Check ()
-runDeclarationWith prop k = k (Check (checkOne prop))
+runDeclarationWith :: MaybeSrcLoc
+                   -> Property state space dynamic result refutation t
+                   -> Metadata state space dynamic result refutation t
+                   -> (Check t -> Composite Check ())
+                   -> Composite Check ()
+runDeclarationWith declSrcLoc prop meta k = k (Check (checkOne declSrcLoc prop))
 
+-- | Takes the source location of the declaration, and also of the call to
+-- check/assert.
 {-# INLINE checkOne #-}
-checkOne :: Property state space dynamic result refutation t -> TVar CheckState -> t -> IO Bool
-checkOne prop tvar t = do
+checkOne :: MaybeSrcLoc
+         -> Property state space dynamic result refutation t
+         -> MaybeSrcLoc
+         -> TVar CheckState
+         -> t
+         -> IO Bool
+checkOne declSrcLoc prop checkSrcLoc tvar t = do
   seed <- atomically (splitStateSeed tvar)
   let result = checkSequential t (randomPoints 99 seed) prop
-  atomically (addPropertyTestResult tvar result)
+  atomically (addPropertyTestResult declSrcLoc checkSrcLoc tvar result)
   pure $! isNothing result
 
 -- | A test will run all properties, even if some property has failed. It's
@@ -236,11 +266,22 @@ data FailingCase where
 -- | Information about the types of a property, useful for showing diagnostic
 -- information.
 data Metadata state space specimen result refutation param = Metadata
-  { metadataLocation :: MaybeSrcLoc -- Where was the property stated.
+  { metadataLocation :: MaybeSrcLoc -- ^ Of the property itself.
   , metadataShowState :: Maybe (state -> Text)
   , metadataShowSpace :: Maybe (space -> Text)
-  , metadataShowSpecimen :: Maybe (specimen -> Text)
+  , metadataShowDynamic :: Maybe (specimen -> Text)
   , metadataShowResult :: Maybe (result -> Text)
   , metadataShowRefutation :: Maybe (refutation -> Text)
   , metadataShowParam :: Maybe (param -> Text)
+  }
+
+noMetadata :: Metadata state space dynamic result refutation param
+noMetadata = Metadata
+  { metadataLocation = UnknownLocation
+  , metadataShowState = Nothing
+  , metadataShowSpace = Nothing
+  , metadataShowDynamic = Nothing
+  , metadataShowResult = Nothing
+  , metadataShowRefutation = Nothing
+  , metadataShowParam = Nothing
   }

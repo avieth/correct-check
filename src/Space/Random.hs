@@ -3,6 +3,7 @@ module Space.Random
   -- * The Gen monad
     Gen (..)
   , sampleAt
+  , sampleAt_
   , ndmap
   , parameter
 
@@ -28,6 +29,7 @@ module Space.Random
   , split_
   , splitN
   , splitUnfold
+  , splitUnfoldN
   , SM.mkSMGen
   , SM.newSMGen
 
@@ -93,7 +95,6 @@ split smgen k = let (g1, g2) = SM.splitSMGen smgen in k g1 g2
 split_ :: Seed -> (Seed, Seed)
 split_ smgen = split smgen (,)
 
-{-# INLINE splitN #-}
 -- | Takes the first n seeds from the infinite list of splitUnfold.
 --
 -- The head of the list is the given seed, thus the resulting list is of length
@@ -103,13 +104,26 @@ split_ smgen = split smgen (,)
 -- 'searchSequential', for instance, is recommended, because GHC can inline the
 -- cons and drastically simplify tests which do not actually depend upon the
 -- random seed.
-splitN :: Natural -> Seed -> NonEmpty Seed
-splitN n g = g NE.:| take (fromIntegral n) (splitUnfold g)
+{-# INLINE splitN #-}
+splitN :: Word32 -> Seed -> NonEmpty Seed
+splitN n g = g NE.:| splitUnfoldN n g
+-- Could also use
+--   splitN n g = g NE.:| take (fromIntegral n) (splitUnfold g)
 
 {-# INLINE splitUnfold #-}
 -- | An infinite list of seeds derived via split from the given seed.
 splitUnfold :: Seed -> [Seed]
 splitUnfold = unfoldr (Just . SM.splitSMGen)
+
+-- | Like 'splitUnfold' but explicitly limits the size of the list.
+{-# INLINE splitUnfoldN #-}
+splitUnfoldN :: Word32 -> Seed -> [Seed]
+splitUnfoldN n seed = unfoldr
+  (\(m, g) -> if m == 0
+              then Nothing
+              else Just (let (g1, g2) = SM.splitSMGen g in (g1, (m-1, g2)) )
+  )
+  (n, seed)
 
 -- | A list of seeds and its length, which can be useful to know.
 -- This should always be
@@ -119,25 +133,27 @@ splitUnfold = unfoldr (Just . SM.splitSMGen)
 --
 -- for some seed g.
 data RandomPoints = RandomPoints
-  { count :: Natural
+  { count :: Int -- Number of points.
   , points :: NonEmpty Seed
   }
 
+-- | Givs n + 1 seeds drived from splitting this seed (see 'splitN').
 {-# INLINE CONLIKE randomPoints #-}
-randomPoints :: Natural -> Seed -> RandomPoints
+randomPoints :: Word32 -> Seed -> RandomPoints
 randomPoints n g = RandomPoints
-  { count = n + 1 -- Because splitN n gives n + 1 seeds.
+  { count = fromIntegral (n + 1)
   , points = splitN n g
   }
 
-{-# INLINE parameter #-}
 -- | 
 -- @ 
 --   fromParameter . constant = pure
 -- @
+{-# INLINE fromParameter #-}
 fromParameter :: NonDecreasing space t -> Gen space t
 fromParameter f = Gen $ \smgen space k -> k smgen (nonDecreasing f space)
 
+{-# INLINE parameter #-}
 parameter :: Gen space space
 parameter = Gen $ \smgen space k -> k smgen space
 
@@ -145,9 +161,13 @@ parameter = Gen $ \smgen space k -> k smgen space
 newSeedIO :: IO Seed
 newSeedIO = SM.initSMGen
 
-{-# INLINE sampleAt #-}
+{-# INLINE CONLIKE sampleAt #-}
 sampleAt :: Seed -> space -> Gen space t -> t
 sampleAt seed space gen = unGen gen seed space $ \_ t -> t
+
+{-# INLINE CONLIKE sampleAt_ #-}
+sampleAt_ :: Gen space t -> Seed -> space -> t
+sampleAt_ gen seed = \space -> unGen gen seed space $ \_ t -> t
 
 -- | Picks a random seed. Intended for playing around / testing this library.
 sampleIO :: space -> Gen space t -> IO t

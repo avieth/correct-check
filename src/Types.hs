@@ -58,6 +58,8 @@ instance Contravariant (Expectation refutation dynamic result) where
 -- often be Text with a human-readable explanation.
 newtype Refutation refutation = Refutation { getRefutation :: refutation }
 
+deriving instance Show refutation => Show (Refutation refutation)
+
 type Expectations refutation dynamic result = Conjunction (Expectation refutation dynamic result)
 
 -- | A non-empty list but as an arbitrary tree so that it's easier to write.

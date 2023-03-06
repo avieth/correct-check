@@ -2,11 +2,12 @@ module Location
   ( HasCallStack
   , CallStack
   , SrcLoc
-  , MaybeSrcLoc
+  , MaybeSrcLoc (..)
   , srcLocOf
   , callStack
   , prettyMaybeSrcLoc
   , prettySrcLoc
+  , withFrozenCallStack
   ) where
 
 import GHC.Stack

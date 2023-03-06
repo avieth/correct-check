@@ -24,6 +24,7 @@ import qualified Data.List.NonEmpty as NE
 import qualified Data.Maybe (mapMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import Data.Word (Word32)
 import Numeric.Natural (Natural)
 import Space.Random as Random
 import GHC.Base (build)
@@ -220,6 +221,60 @@ searchFunction :: Strategy state space
                -> Maybe (Seed, (state, space, failure))
 searchFunction strategy state space p = withPoint (runStrategy strategy state space . p)
 
+-- Note about rewrite rules.
+--
+-- Suppose we have a test that doesn't depend upon the random seed. We would
+-- hope that a search over a list of seeds could short-circuit automatically,
+-- and give the result of one run, without even forcing the list of all random
+-- seeds.
+--
+-- If the test is known to fail (gives Just) then laziness does this for us.
+-- 'searchSequential', for instance, will only force the head of the list,
+-- because it's Just.
+--
+-- But if the test is known to never fail (gives Nothing) then things are more
+-- complicated. We know that such a search can be rewritten:
+--
+--     headOfList (mapMaybeWithPoint (const r) seeds)
+--   = case seeds of
+--       [] -> Nothing
+--       (s:_) -> case r of
+--         Nothing -> Nothing
+--         Just y -> (s, y)
+--
+
+{-# RULES
+"headOfListMapMaybeWithPointConst1" forall r xs .
+    headOfList (mapMaybeWithPoint (\_ -> r) xs)
+  = case xs of
+      [] -> Nothing
+      (x:_) -> case r of
+        Nothing -> Nothing
+        Just y -> Just (x, y)
+
+"headOfListMapMaybeParallelConst1" forall n m strat r xs .
+    headOfList (mapMaybeParallel (\_ -> r) n m strat xs)
+  = case xs of
+      [] -> Nothing
+      (x:_) -> case r of
+        Nothing -> Nothing
+        Just y -> Just (x, y)
+#-}
+
+-- TODO
+-- There may be other rewrite rules that we'd like regarding mapMaybeWithPoint
+-- and mapMaybeParallel when the function given is known to be a constant.
+-- For instance:
+--
+--     mapMaybeWithPoint (const r) xs
+--   = case r of
+--       Nothing -> []
+--       Just y -> fmap (const y) xs
+--
+-- This can save work in a full search, but will it interfere with the
+-- headOfList rules? We would want those ones to go first, so we would need
+-- some phase control.
+
 {-# INLINE searchSequentialAll #-}
 -- | Uses 'searchSpace' at each seed. For those which have a failing example,
 -- the minimal space is given along with its search state.
@@ -231,9 +286,7 @@ searchSequentialAll :: forall state space failure .
                     -> RandomPoints
                     -> [(Seed, (state, space, failure))]
 searchSequentialAll strategy initialState startSpace p =
-    mapMaybe (searchFunction strategy initialState startSpace p)
-    -- FIXME probably not benefit of having mapMaybeWithPoint. Should remove it.
-    -- mapMaybeWithPoint (runStrategy strategy initialState startSpace . p)
+    mapMaybeWithPoint (runStrategy strategy initialState startSpace . p)
   . NE.toList
   . Random.points
   where
@@ -256,7 +309,7 @@ searchSequential strategy initialState startSpace p =
 -- There is no parallelism at each random point: complicating and simplifying
 -- phases are all sequential.
 searchParallelAll :: forall state space failure .
-                     Natural -- ^ How much parallelism
+                     Word32 -- ^ How much parallelism
                   -> Strategy state space
                   -> state
                   -> space
@@ -264,7 +317,7 @@ searchParallelAll :: forall state space failure .
                   -> RandomPoints
                   -> [(Seed, (state, space, failure))]
 searchParallelAll parallelism strategy initialState startSpace p rpoints =
-  mapMaybeParallel (searchFunction strategy initialState startSpace p) parallelism (Random.count rpoints) pstrat (NE.toList (Random.points rpoints))
+  mapMaybeParallel (runStrategy strategy initialState startSpace . p) (fromIntegral parallelism) (Random.count rpoints) pstrat (NE.toList (Random.points rpoints))
   where
     -- Evaluation strategy for each element? We only need to figure out whether
     -- it's Just or Nothing, and that's done by mapMaybeParallel.
@@ -282,7 +335,7 @@ searchParallelAll parallelism strategy initialState startSpace p rpoints =
 -- of the seed list), but that's okay, since we can still expect that answer to
 -- be found faster than it would have been by 'searchSequential'.
 searchParallel :: forall state space failure .
-                  Natural -- ^ How much parallelism
+                  Word32 -- ^ How much parallelism
                -> Strategy state space
                -> state
                -> space
@@ -296,7 +349,7 @@ searchParallel parallelism strategy initialState startSpace p =
 makeTriple :: c -> (a, b) -> (a, b, c)
 makeTriple c (a, b) = (a, b, c)
 
-{-# INLINE headOfList #-}
+{-# INLINE [2] headOfList #-}
 headOfList :: [a] -> Maybe a
 headOfList [] = Nothing
 headOfList (x:_) = Just x
@@ -318,7 +371,7 @@ mapMaybeWithPoint :: (a -> Maybe b) -> [a] -> [(a, b)]
 mapMaybeWithPoint = mapMaybeWithPointMagic
 
 {-# RULES
-"mapMaybeWithPoint" [2] mapMaybeWithPoint = mapMaybeWithPointMagic
+"mapMaybeWithPoint" [1] mapMaybeWithPoint = mapMaybeWithPointMagic
 #-}
 
 -- | Like 'mapMaybe' but keeps the input to the function around.
@@ -360,16 +413,16 @@ mapMaybeWithPointFB cons f x next = case f x of
 -- A strategy can be given for the thing inside the Maybe. The only evaluation
 -- that 'mapMaybeParallel' commits to is of course WHNF of the Maybe.
 {-# INLINE [2] mapMaybeParallel #-}
-mapMaybeParallel :: (a -> Maybe b) -> Natural -> Natural -> Parallel.Strategy b -> [a] -> [b]
+mapMaybeParallel :: (a -> Maybe b) -> Int -> Int -> Parallel.Strategy (a, b) -> [a] -> [(a, b)]
 mapMaybeParallel p n l strat =
   if n <= 1
-  then Data.Maybe.mapMaybe p
-  else mapMaybeParallelAt p (fromIntegral q) (fromIntegral r) strat
+  then mapMaybeWithPoint p
+  else mapMaybeParallelAt p q r strat
   where
     (q, r) = l `divMod` n
 
 {-# NOINLINE mapMaybeParallelAt #-}
-mapMaybeParallelAt :: (a -> Maybe b) -> Int -> Int -> Parallel.Strategy b -> [a] -> [b]
+mapMaybeParallelAt :: (a -> Maybe b) -> Int -> Int -> Parallel.Strategy (a, b) -> [a] -> [(a, b)]
 mapMaybeParallelAt p quotient remainder strat lst = concat (Parallel.runEval (go remainder lst))
   where
     go r lst = do
@@ -378,15 +431,14 @@ mapMaybeParallelAt p quotient remainder strat lst = concat (Parallel.runEval (go
       -- evalList with the given strat will force the spine of the list and
       -- therefore will accomplish the work that we wanted to do in parallel:
       -- determining whether each element is Just or Nothing.
-      prefix' <- Parallel.rparWith (Parallel.evalList strat) (Data.Maybe.mapMaybe p prefix)
+      prefix' <- Parallel.rparWith (Parallel.evalList strat) (mapMaybeWithPoint p prefix)
       case suffix of
         [] -> pure [prefix']
         suffix@(_:_) -> do
           suffix' <- go (if r <= 0 then 0 else r - 1) suffix
           pure (prefix' : suffix')
 
--- TODO if mapMaybeWithPoint proves useful, define analogous mapMaybeParallelAt.
-
+-- Not all of these are necessary / ever used.
 {-# RULES
 "mapMaybeConstNothing1" mapMaybe (\_ -> Nothing) = const []
 "mapMaybeConstNothing2" forall xs . mapMaybe (\_ -> Nothing) xs = []
@@ -396,13 +448,13 @@ mapMaybeParallelAt p quotient remainder strat lst = concat (Parallel.runEval (go
 
 "mapMaybeConst" forall r xs . mapMaybe (\_ -> r) xs = maybe [] (flip fmap xs . const) r
 
-"mapMaybeWithPointConstNothing1" [2] mapMaybeWithPoint (\_ -> Nothing) = const []
-"mapMaybeWithPointConstNothing2" [2] forall xs . mapMaybeWithPoint (\_ -> Nothing) xs = []
+"mapMaybeWithPointConstNothing1" mapMaybeWithPoint (\_ -> Nothing) = const []
+"mapMaybeWithPointConstNothing2" forall xs . mapMaybeWithPoint (\_ -> Nothing) xs = []
 
-"mapMaybeWithPointConstJust1" [2] forall r . mapMaybeWithPoint (\_ -> Just r) = fmap (flip (,) r)
-"mapMaybeWithPointConstJust2" [2] forall r xs . mapMaybeWithPoint (\_ -> Just r) xs = fmap (flip (,) r) xs
+"mapMaybeWithPointConstJust1" forall r . mapMaybeWithPoint (\_ -> Just r) = fmap (flip (,) r)
+"mapMaybeWithPointConstJust2" forall r xs . mapMaybeWithPoint (\_ -> Just r) xs = fmap (flip (,) r) xs
 
-"mapMaybeWithPointConst" [2] forall r xs . mapMaybeWithPoint (\_ -> r) xs = maybe [] (flip fmap xs . (,)) r
+"mapMaybeWithPointConst" forall r xs . mapMaybeWithPoint (\_ -> r) xs = maybe [] (flip fmap xs . (,)) r
 
 -- This is the one that actually fires for unit tests. If a const (const (Just x))
 -- test predicate is applied to a parallel or sequential search, what we end up
@@ -420,16 +472,4 @@ mapMaybeParallelAt p quotient remainder strat lst = concat (Parallel.runEval (go
 "pickFirstFailingConstNothing2" forall x . pickFirstFailing (\_ -> Nothing) x = Nothing
 
 "pickFirstFailingConstJust" forall r x xs . pickFirstFailing (\_ -> Just r) (x:xs) = Just (makeTriple r x)
-#-}
-
-{-# RULES
-"mapMaybeParallelAtConstNothing1" forall n l s . mapMaybeParallelAt (\_ -> Nothing) n l s = const []
-"mapMaybeParallelAtConstNothing2" forall n l s xs . mapMaybeParallelAt (\_ -> Nothing) n l s xs = []
-
-"mapMaybeParallelAtConstJust1" forall n l s r . mapMaybeParallelAt (\_ -> Just r) n l s = fmap (const r)
-"mapMaybeParallelAtConstJust2" forall n l s r xs . mapMaybeParallelAt (\_ -> Just r) n l s xs = fmap (const r) xs
-
-"mapMaybeParallelAtConst" forall n l s r xs . mapMaybeParallelAt (\_ -> r) n l s xs = maybe [] (flip fmap xs . const) r
-
-"mapMaybeParallelAtJust1" forall n l s c . mapMaybeParallelAt (\s -> Just (s, c)) n l s = fmap (flip (,) c)
 #-}
