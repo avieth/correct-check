@@ -94,6 +94,10 @@ data Counterexample space dynamic refutation = Counterexample
   }
 
 -- TODO
+instance Show (Counterexample space dynamic refutation) where
+  show = const "Counterexample"
+
+-- TODO
 prettyCounterexample :: Counterexample space dynamic refutation -> Text
 prettyCounterexample _ = mempty
 
