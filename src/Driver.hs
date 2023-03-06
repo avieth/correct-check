@@ -215,6 +215,6 @@ searchPredicate gen test t = \seed space ->
 -- instance.
 {-# INLINE checkExpectation #-}
 checkExpectation :: t -> dynamic -> result -> Expectation refutation dynamic result t -> [Refutation refutation]
-checkExpectation t d r (Expectation refutation v) = case runVerification v t d r of
+checkExpectation t d r (Expectation _mSrcLoc refutation v) = case runVerification v t d r of
   True -> []
   False -> [refutation]

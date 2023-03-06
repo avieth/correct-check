@@ -79,12 +79,11 @@ example_property = Property
 -- In practice, expectations would only be defined once a subject is known.
 example_expectations :: Eq a => Expectations String [a] [a] ()
 example_expectations =
-     assert (that "reverse . reverse = id" $ \() lst lst' -> lst == reverse lst')
-  .& assert (that "last = head . reverse"  $ \() lst lst' -> head lst == last lst')
+     (that "reverse . reverse = id" $ \() lst lst' -> lst == reverse lst')
+  .& (that "last = head . reverse"  $ \() lst lst' -> head lst == last lst')
   where
     head [] = Nothing
     head (x:_) = Just x
     last [] = Nothing
     last [x] = Just x
     last (_:xs) = last xs
-

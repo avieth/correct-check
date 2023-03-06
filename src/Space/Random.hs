@@ -25,6 +25,7 @@ module Space.Random
   , Seed
   , newSeedIO
   , split
+  , split_
   , splitN
   , splitUnfold
   , SM.mkSMGen
@@ -87,6 +88,10 @@ instance Monad (Gen space) where
 {-# INLINE split #-}
 split :: Seed -> (Seed -> Seed -> t) -> t
 split smgen k = let (g1, g2) = SM.splitSMGen smgen in k g1 g2
+
+{-# INLINE split_ #-}
+split_ :: Seed -> (Seed, Seed)
+split_ smgen = split smgen (,)
 
 {-# INLINE splitN #-}
 -- | Takes the first n seeds from the infinite list of splitUnfold.

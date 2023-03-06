@@ -1,6 +1,8 @@
-module UnitTest where
+--module UnitTest where
 
+import Control.Concurrent.MVar
 import Data.Maybe (mapMaybe)
+import Composite
 import Driver
 import Property
 import Space
@@ -91,7 +93,7 @@ exampleUnitTest = Property
   { domain = unitTestDomain
   , test = Test
       { subject = Subject $ \n _ -> Debug.trace ("Evaluating unit test at " ++ show n) (sum [1..n])
-      , expectations = assert $ that "Gauss was right" $ \n _ s -> s == n * (n + 1) `div` 2
+      , expectations = that "Gauss was right" $ \n _ s -> s == n * (n + 1) `div` 2
       }
   }
 
@@ -119,7 +121,7 @@ exampleNonUnitTest trace = Property
       }
   , test = Test
       { subject = Subject $ \_ n -> trace ("Evaluating non unit test at " ++ show n) (sum [1..n])
-      , expectations = assert $ that "Gauss was right" $ \_ n s -> s == n * (n + 1) `div` 2
+      , expectations = that "Gauss was right" $ \_ n s -> s == n * (n + 1) `div` 2
       }
   }
 
@@ -153,3 +155,25 @@ main = do
   quickCheck (2 ^ 64) () (exampleNonUnitTest Debug.trace) >>= print
   -- Can't give a big list here, because we're going to have to search everything.
   quickCheckParallel 8 (2 ^ 16) () (exampleNonUnitTestWithRandomness (flip const)) >>= print
+
+  -- A unit test will still simplify within a composite test.
+  Debug.traceM "Begin composite test"
+  mvar <- newMVar ()
+  result <- composite $ declare exampleUnitTest $ \unitTest -> do
+    b <- check unitTest 142
+    effect (putStrLn $ "Passed? " ++ show b)
+    () <- assert unitTest 1042
+    bracket (takeMVar mvar) (putMVar mvar) $ \_ -> do
+      assert unitTest 142
+    effect (putStrLn $ "Passed? " ++ show b)
+    -- Why do we bother with composite/declare?
+    -- After all, we can still run properties directly, and even via quickCheck
+    -- because we can do IO for a new random seed.
+    effect (quickCheck (2 ^ 64) 200 exampleUnitTest >>= print)
+    -- The point of composite/declare is to put a barrier between the properties
+    -- that may be tested, and everything else. It ensures that the arbitrary IO
+    -- in the composite cannot interact with the TVar CheckState.
+    pure ()
+  -- The bracket within the composite ensures this will not block.
+  takeMVar mvar
+  showTestResult result
