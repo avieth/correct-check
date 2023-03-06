@@ -39,6 +39,7 @@ module Space.Random
 
   -- * Extra stuff
   , sampleIO
+  , clampToWord32
   ) where
 
 import Prelude hiding (id, (.))
@@ -265,3 +266,12 @@ readSeedHex str = do
     fromHex str = case readHex str of
       [(w64, "")] -> Just w64
       _ -> Nothing
+
+-- | Useful for programs which wish to take a Natural from the programmer, but
+-- clamp it to a Word32 and fail early if it's too big. Avoids silly mistakes
+-- like, e.g. writing 2 ^ 64 as a Word32 and getting 0.
+clampToWord32 :: String -> Natural -> Word32
+clampToWord32 tag n = m
+  where
+    !m = if n >= 2^(32 :: Int) then error msg' else fromIntegral n
+    msg' = mconcat [ tag, ": ", show n, " is too lager (maximum 32 bit unsigned)" ]
