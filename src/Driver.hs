@@ -40,23 +40,32 @@ import Types
 -- It's in IO because it will grab a new random seed from system entropy.
 --
 -- To re-run a complete 'quickCheck', use 'quickCheckAt'.
-quickCheck :: t -> Natural -> Property state space dynamic result refutation t -> IO (QuickCheck space dynamic refutation)
-quickCheck t n prop = newSeedIO <&> \seed -> quickCheckAt seed t n prop
+quickCheck :: Natural -> t -> Property state space dynamic result refutation t -> IO (QuickCheck space dynamic refutation)
+quickCheck n t prop = newSeedIO <&> quickCheckAt n t prop
 
 {-# INLINE quickCheckParallel #-}
-quickCheckParallel :: t -> Natural -> Natural -> Property state space dynamic result refutation t -> IO (QuickCheck space dynamic refutation)
-quickCheckParallel t m n prop = newSeedIO <&> \seed -> quickCheckParallelAt seed t m n prop
+quickCheckParallel :: Natural -> Natural -> t -> Property state space dynamic result refutation t -> IO (QuickCheck space dynamic refutation)
+quickCheckParallel m n t prop = newSeedIO <&> quickCheckParallelAt m n t prop
 
 {-# INLINE quickCheckAt #-}
-quickCheckAt :: Seed -> t -> Natural -> Property state space dynamic result refutation t -> QuickCheck space dynamic refutation
-quickCheckAt seed t n prop = maybe (Passed n seed) (Failed n seed)
+quickCheckAt :: Natural
+             -> t
+             -> Property state space dynamic result refutation t
+             -> Seed
+             -> QuickCheck space dynamic refutation
+quickCheckAt n t prop seed = maybe (Passed n seed) (Failed n seed)
   -- checkSequential always uses at least one point, so we have to check n here.
   -- randomPoints takes the number of points desired less 1.
   (if n > 0 then checkSequential t (randomPoints (n-1) seed) prop else Nothing)
 
 {-# INLINE quickCheckParallelAt #-}
-quickCheckParallelAt :: Seed -> t -> Natural -> Natural -> Property state space dynamic result refutation t -> QuickCheck space dynamic refutation
-quickCheckParallelAt seed t m n prop = maybe (Passed n seed) (Failed n seed)
+quickCheckParallelAt :: Natural
+                     -> Natural
+                     -> t
+                     -> Property state space dynamic result refutation t
+                     -> Seed
+                     -> QuickCheck space dynamic refutation
+quickCheckParallelAt m n t prop seed = maybe (Passed n seed) (Failed n seed)
   -- checkSequential always uses at least one point, so we have to check n here.
   -- randomPoints takes the number of points desired less 1.
   (if n > 0 then checkParallel m t (randomPoints (n-1) seed) prop else Nothing)
@@ -174,13 +183,33 @@ searchPredicate :: forall space dynamic result refutation t .
                 -> Test dynamic result refutation t
                 -> t
                 -> (Seed -> space -> Maybe (dynamic, NonEmpty (Refutation refutation)))
-searchPredicate gen test t = \seed space ->
-  -- It's important that this inlines well. Could it be improved?
+searchPredicate gen test t = \seed space -> 
+  -- Want to make this function simplify in a certain way.
+  --
+  -- Writing it as an explicit lambda on seed and space seems to help the
+  -- simplifier to do the right thing.
+  --
+  -- In case GHC can determine that `sampleAt seed space gen = x`, it
+  -- ought to be floated out.
+  --
+  -- After that, `result = runSubject (subject test) t x` could also be
+  -- floated out, and so could `refutations`.
+  --
+  -- If we want a rewrite rule to fire, we'll need GHC to float these out and
+  -- put an explicit lambda.
+  --
+  --   let x = sampleAt seed space gen
+  --       result = runSubject (subject test) t dynamic
+  --       refutations = runConjunction (checkExpectation t dynamic result) (expectations test)
+  --    in \() -> case refutations of
+  --         [] -> Nothing
+  --         (r:rs) -> Just (x, r :| rs)
+  --
+  -- Or is there another avenue?
   let dynamic = sampleAt seed space gen
       result = runSubject (subject test) t dynamic
-      refutations :: [Refutation refutation]
       refutations = runConjunction (checkExpectation t dynamic result) (expectations test)
-   in (,) dynamic <$> nonEmpty refutations
+   in fmap ((,) dynamic) (nonEmpty refutations)
 
 -- | Defined for use in runConjunction; choice of list is for its semigroup
 -- instance.

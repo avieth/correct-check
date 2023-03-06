@@ -26,6 +26,7 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Numeric.Natural (Natural)
 import Space.Random as Random
+import GHC.Base (build)
 
 -- | Defines how to search an ordered space.
 --
@@ -57,7 +58,7 @@ unitSearchStrategy = Strategy
 --
 hedgehogSearchStrategy :: Strategy state Natural
 hedgehogSearchStrategy = Strategy
-  { complicate = \st n -> if n > upperBound then [] else [(st, n+1)]
+  { complicate = \st n -> if n >= upperBound then [] else [(st, n+1)]
   , simplify = \st n -> if n == 0 then [] else [(st, n-1)]
   }
   -- Hedgehog uses 99 as the upper bound.
@@ -131,11 +132,6 @@ pickFailing :: (space -> Maybe failure) -> (state, space) -> Maybe (state, space
 pickFailing p x = do
   y <- p (snd x)
   pure (fst x, snd x, y)
-
-{-# INLINE pickFailingWithSeed #-}
-pickFailingWithSeed :: (Seed, Maybe (state, space, failure)) -> Maybe (Seed, state, space, failure)
-pickFailingWithSeed (_seed, Nothing) = Nothing
-pickFailingWithSeed (seed, Just (state, space, failure)) = Just (seed, state, space, failure)
 
 -- INLINE phase 2 or later, so that we give the RULES a chance to fire.
 {-# INLINE [2] pickFirstFailing #-}
@@ -212,29 +208,16 @@ simplifyDepthFirst simplify p = goSimplify
       Nothing -> (state, space, failure)
       Just simplified -> goSimplify simplified
 
--- | Used in the definition of sequential and parallel search. Searches the
--- space at this particular seed.
-{-# INLINE searchOne #-}
-searchOne :: Strategy state space
-          -> state
-          -> space
-          -> (Seed -> space -> Maybe failure)
-          -> Seed
-          -> (Seed, Maybe (state, space, failure))
-searchOne strategy state space p seed = (seed, runStrategy strategy state space (p seed))
-
 -- | Used in 'searchSequentialAll' and 'searchParallelAll' as an argument to
 -- 'mapMaybe' or 'mapMaybeParallel'. It's important that this function inlines
 -- well, to allow for rewrite rules.
 {-# INLINE searchFunction #-}
-  {-
-searchFunction :: Strategy state space -> state -> space -> (Seed -> space -> Maybe failure) -> Seed -> Maybe (Seed, state, space, failure)
-searchFunction strategy initialState startSpace p = pickFailingWithSeed . searchOne strategy initialState startSpace p
---searchFunction strategy state space p seed = case runStrategy strategy state space (p seed) of
---  Nothing -> Nothing
---  Just (state, space, failure) -> Just (seed, state, space, failure)
--}
-searchFunction :: Strategy state space -> state -> space -> (Seed -> space -> Maybe failure) -> Seed -> Maybe (Seed, (state, space, failure))
+searchFunction :: Strategy state space
+               -> state
+               -> space
+               -> (Seed -> space -> Maybe failure)
+               -> Seed
+               -> Maybe (Seed, (state, space, failure))
 searchFunction strategy state space p = withPoint (runStrategy strategy state space . p)
 
 {-# INLINE searchSequentialAll #-}
@@ -249,6 +232,8 @@ searchSequentialAll :: forall state space failure .
                     -> [(Seed, (state, space, failure))]
 searchSequentialAll strategy initialState startSpace p =
     mapMaybe (searchFunction strategy initialState startSpace p)
+    -- FIXME probably not benefit of having mapMaybeWithPoint. Should remove it.
+    -- mapMaybeWithPoint (runStrategy strategy initialState startSpace . p)
   . NE.toList
   . Random.points
   where
@@ -316,15 +301,54 @@ headOfList :: [a] -> Maybe a
 headOfList [] = Nothing
 headOfList (x:_) = Just x
 
--- Used in the LHS of RULE definitions, so we don't want it inlined too soon.
+-- | Used in the LHS of RULE definitions, so we don't want it inlined too soon.
 -- mapMaybe itself has a NOINLINE.
-{-# INLINE [2] mapMaybe #-}
+{-# NOINLINE mapMaybe #-}
 mapMaybe :: (a -> Maybe b) -> [a] -> [b]
 mapMaybe = Data.Maybe.mapMaybe
 
 {-# INLINE withPoint #-}
 withPoint :: (a -> Maybe b) -> (a -> Maybe (a,b))
 withPoint f a = (,) a <$> f a
+
+-- | A rule will rewrite this to 'mapMaybeWithPointMagic', but gives us the
+-- opportunity to apply more specialized rules as well.
+{-# NOINLINE mapMaybeWithPoint #-}
+mapMaybeWithPoint :: (a -> Maybe b) -> [a] -> [(a, b)]
+mapMaybeWithPoint = mapMaybeWithPointMagic
+
+{-# RULES
+"mapMaybeWithPoint" [2] mapMaybeWithPoint = mapMaybeWithPointMagic
+#-}
+
+-- | Like 'mapMaybe' but keeps the input to the function around.
+--
+-- It's defined just like the original, even with rewrite rules and inline
+-- directives copied. Hence the magical suffix.
+--
+-- It exists so that we can do a rewrite rule on it when the argument function
+-- is \_ -> r, which can/will happen when running a property test which doesn't
+-- use any randomness.
+mapMaybeWithPointMagic :: (a -> Maybe b) -> [a] -> [(a, b)]
+mapMaybeWithPointMagic _ [] = []
+mapMaybeWithPointMagic f (x:xs) =
+  let rs = mapMaybeWithPointMagic f xs in
+  case f x of
+    Nothing -> rs
+    Just y -> (x,y):rs
+{-# NOINLINE [1] mapMaybeWithPointMagic #-}
+
+{-# RULES
+"mapMaybeWithPointMagic"     [~1] forall f xs. mapMaybeWithPointMagic f xs
+                                  = build (\c n -> foldr (mapMaybeWithPointFB c f) n xs)
+"mapMaybeWithPointMagicList" [1]  forall f. foldr (mapMaybeWithPointFB (:) f) [] = mapMaybeWithPoint f
+#-}
+
+{-# INLINE [0] mapMaybeWithPointFB #-}
+mapMaybeWithPointFB :: ((a,b) -> r -> r) -> (a -> Maybe b) -> a -> r -> r
+mapMaybeWithPointFB cons f x next = case f x of
+  Nothing -> next
+  Just r -> cons (x,r) next
 
 -- | First argument `n` is the amount of parallelism, second `l` is the length
 -- of the list.
@@ -361,6 +385,8 @@ mapMaybeParallelAt p quotient remainder strat lst = concat (Parallel.runEval (go
           suffix' <- go (if r <= 0 then 0 else r - 1) suffix
           pure (prefix' : suffix')
 
+-- TODO if mapMaybeWithPoint proves useful, define analogous mapMaybeParallelAt.
+
 {-# RULES
 "mapMaybeConstNothing1" mapMaybe (\_ -> Nothing) = const []
 "mapMaybeConstNothing2" forall xs . mapMaybe (\_ -> Nothing) xs = []
@@ -369,6 +395,14 @@ mapMaybeParallelAt p quotient remainder strat lst = concat (Parallel.runEval (go
 "mapMaybeConstJust2" forall r xs . mapMaybe (\_ -> Just r) xs = fmap (const r) xs
 
 "mapMaybeConst" forall r xs . mapMaybe (\_ -> r) xs = maybe [] (flip fmap xs . const) r
+
+"mapMaybeWithPointConstNothing1" [2] mapMaybeWithPoint (\_ -> Nothing) = const []
+"mapMaybeWithPointConstNothing2" [2] forall xs . mapMaybeWithPoint (\_ -> Nothing) xs = []
+
+"mapMaybeWithPointConstJust1" [2] forall r . mapMaybeWithPoint (\_ -> Just r) = fmap (flip (,) r)
+"mapMaybeWithPointConstJust2" [2] forall r xs . mapMaybeWithPoint (\_ -> Just r) xs = fmap (flip (,) r) xs
+
+"mapMaybeWithPointConst" [2] forall r xs . mapMaybeWithPoint (\_ -> r) xs = maybe [] (flip fmap xs . (,)) r
 
 -- This is the one that actually fires for unit tests. If a const (const (Just x))
 -- test predicate is applied to a parallel or sequential search, what we end up

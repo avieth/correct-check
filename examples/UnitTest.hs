@@ -6,12 +6,12 @@ import Property
 import Space
 import Types
 
-import Debug.Trace
+import qualified Debug.Trace as Debug
 
 -- A unit test is a special case of a property test in which
 -- - the dynamic part is () and therefore no randomness is used
--- - the search space is () and therefore no searching needs to be done
--- and so the only sensible domain is
+-- - the search space is () and therefore no searching is ever done
+-- and so the only sensible domain is:
 
 unitTestDomain :: Domain () () ()
 unitTestDomain = Domain
@@ -32,6 +32,9 @@ unitTestDomain = Domain
 -- directives in Space.Search which make this possible. And so this property
 -- testing framework can be used to express unit tests just as well, without any
 -- extra cost.
+
+-- Here are some blatantly obvious cases, in which GHC judged it can skip the
+-- entire search because the test case result is completely static.
 
 -- This will simplify to Nothing, because `runStrategy` will be inlined and
 -- `pickFirstFailing (const Nothing)` will be rewritten to `Nothing`.
@@ -66,106 +69,87 @@ shouldSimplify_4 = searchParallel 2 unitSearchStrategy () () (const (const Nothi
 shouldSimplify_5 :: Maybe (Seed, ((), (), Int))
 shouldSimplify_5 = searchParallel 2 unitSearchStrategy () () (const (const (Just 42))) (randomPoints 99 (mkSMGen 42))
 
-  {-
--- shouldSimplify_6 :: Seed -> Maybe (Seed, ((), (), Int))
--- shouldSimplify_6 seed = searchSequential unitSearchStrategy () () (const (const Nothing)) (randomPoints 99 seed)
-
--- TODO now try it on checkSequential and checkParallel. They should also
--- simplify just like the searches.
+-- Now for the more interesting cases of checkSequential and checkParallel on a
+-- somewhat less contrived example.
 --
--- To do this, we'll need a unit test property.
+-- For non-trivial unit tests, we can't expect GHC to be able to completely
+-- eliminate the list from the generated code, but we should expect it to
+-- generate code which evaluates the test at most once, even if more than one
+-- random sample is requested.
 --
--- Here's one: it checks that the sum of 1 to n is n*(n+1)/2, but only at a
--- single given number. It doesn't use any randomness, and the search space is
--- the unit space, so it's a unit test.
+-- To demonstrate, we'll need a unit test property. Here's one: it checks that
+-- the sum of 1 to n is n*(n+1)/2, but only at one given number. It doesn't
+-- use any randomness, and the search space is the unit space, so it's a unit
+-- test.
 --
 -- To make things interesting, we'll put a trace in the subject function. If
--- things are working properly, then a quickCheck of this property should
+-- things are working properly, then a 'quickCheck' of this property should
 -- print the trace at most once. It will still claim to have run the test at
 -- as many samples as instructed, which may seem like a lie, but is it really?
 exampleUnitTest :: Property () () () Int String Int
 exampleUnitTest = Property
   { domain = unitTestDomain
   , test = Test
-      { subject = Subject $ \n _ -> trace "EVAL" (sum [1..n])
+      { subject = Subject $ \n _ -> Debug.trace ("Evaluating unit test at " ++ show n) (sum [1..n])
       , expectations = assert $ that "Gauss was right" $ \n _ s -> s == n * (n + 1) `div` 2
       }
   }
 
--- What we can hope for here is that GHC will float out the evaluation of the
--- test, which only needs to happen once.
---
--- But it still won't know statically whether it's a Just or a Nothing, so
--- can we expect a rewrite? We'll get a form that looks like
---
---   let result = floatedUnitTestResult
---       ...
---    in mapMaybe (\s -> fmap ((,) s) result) xs
---
--- which should rewrite to
---
---   case result of
---     Nothing -> const Nothing
---     Just r -> \xs -> case xs of
---       [] -> Nothing
---       (x:xs) -> Just (s, r)
---
--- and that would fuse the list away.
---
--- Should define our own mapMaybe variant
---
---   mapMaybeWithPoint :: (a -> Maybe b) -> [a] -> [(a, b)]
---
--- with rewrite rule
---
---   mapMaybeWithPoint (\_ -> r) xs = case r of
---     Nothing -> []
---     Just t -> fmap (flip (,) t) xs
---
--- and then rely upon headOfList inlining on this to simplify further to
---
---   headOfList (mapMaybeWithPoint (\_ -> r) xs) = case r of
---     Nothing -> Nothing
---     Just t -> case xs of
---       [] -> Nothing 
---       (x:_) -> flip (,) t x
---
---
--- Should work!
--- So that's the cool thing: the rewrite rules previously discussed would only
--- work if you actually wrote out a statically constant unit test. But if you
--- write a unit test that actually does need to compute something, GHC can still
--- fuse away the random sampling part and skip it.
-shouldSimplify_7 :: Maybe (Counterexample () () String)
-shouldSimplify_7 = checkSequential 100 (randomPoints 99 (mkSMGen 42)) exampleUnitTest
+shouldMemoize_1 :: Maybe (Counterexample () () String)
+shouldMemoize_1 = checkSequential 100 (randomPoints 99 (mkSMGen 42)) exampleUnitTest
 
-{-
+shouldMemoize_2 :: Maybe (Counterexample () () String)
+shouldMemoize_2 = checkParallel 8 100 (randomPoints 99 (mkSMGen 43)) exampleUnitTest
 
-
-
-exampleNonUnitTest :: Property () Natural Natural Natural String ()
-exampleNonUnitTest = Property
+-- For contrast with the unit test, here's the same thing but the parameter
+-- comes is derived from the search space. There is no randomness, so a
+-- 'quickCheck' on this shouldn't evaluate at multiple random points. However,
+-- the driver _will_ have to search through the space for a minimal failing,
+-- so the subject will be evaluated potentially more than once (GHC can't
+-- float it out).
+exampleNonUnitTest :: (forall t. String -> t -> t) -> Property () Natural Int Int String ()
+exampleNonUnitTest trace = Property
   { domain = Domain
       { search = Search
           { strategy = hedgehogSearchStrategy
           , initialState = ()
           , minimalSpace = 0
           }
-      , generate = do
-          w8 <- genWord8
-          n <- parameter
-          pure (fromIntegral w8 + n)
+      , generate = fromIntegral <$> parameter
       }
   , test = Test
-      { subject = Subject $ \_ n -> sum [1..n]
+      { subject = Subject $ \_ n -> trace ("Evaluating non unit test at " ++ show n) (sum [1..n])
       , expectations = assert $ that "Gauss was right" $ \_ n s -> s == n * (n + 1) `div` 2
       }
   }
--}
 
---main :: IO ()
--- main = checkSequential 100 (randomPoints 99 seed) exampleUnitTest
---main = quickCheck 100 (2*4096) exampleUnitTest >>= print
---main = quickCheckParallel () 8 (2*4096) exampleNonUnitTest >>= print
--- main = quickCheck () (2*4096) exampleNonUnitTest >>= print
--}
+-- The same non-unit test as above, but this one _does_ have randomness.
+-- A 'quickCheck' of this one will have to search at every point.
+exampleNonUnitTestWithRandomness :: (forall t. String -> t -> t) -> Property () Natural Int Int String ()
+exampleNonUnitTestWithRandomness trace = base 
+  { domain = (domain base)
+    { generate = do
+        w8 <- genWord8
+        n <- parameter
+        pure (fromIntegral w8 + fromIntegral n)
+    }
+  }
+  where
+    base = exampleNonUnitTest trace
+
+main :: IO ()
+main = do
+  print shouldMemoize_1
+  -- This won't evaluate the subject again. In this case that's good, but in
+  -- general could be bad, in case the unit test result is so big it could be
+  -- considered a space leak.
+  print shouldMemoize_2
+  -- Each of these will evaluate the unit test once, and immediately pass,
+  -- without paying the cost of 2^64 tests.
+  quickCheck (2 ^ 64) 101 exampleUnitTest >>= print
+  quickCheckParallel 8 (2 ^ 64) 102 exampleUnitTest >>= print
+  -- This one will do a search, but only at one random point, since the
+  -- generator doesn't use the random seed.
+  quickCheck (2 ^ 64) () (exampleNonUnitTest Debug.trace) >>= print
+  -- Can't give a big list here, because we're going to have to search everything.
+  quickCheckParallel 8 (2 ^ 16) () (exampleNonUnitTestWithRandomness (flip const)) >>= print
