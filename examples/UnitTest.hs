@@ -136,8 +136,8 @@ exampleNonUnitTest trace = Property
       -- Here they will both fail at 42, so they'll always both appear in the
       -- report.
       , expectations =
-             (that "Gauss was right" $ \_ n s -> if n == 42 then False else (s == n * (n + 1) `div` 2))
-          .& (that "Silly property" $ \_ n s -> if n == 42 then False else True)
+             (that "Gauss was right" $ \_ n s -> if n == 142 then False else (s == n * (n + 1) `div` 2))
+          .& (that "Silly property" $ \_ n s -> if n == 142 then False else True)
       }
   }
 
@@ -184,9 +184,12 @@ main = do
   -- A unit test will still simplify within a composite test.
   Debug.traceM "Begin composite test"
   mvar <- newMVar ()
-  result <- composite defaultGlobalConfig $
+  result <-
+    composite defaultGlobalConfig $
     declare "UNIT TEST" exampleUnitTest viaShowRenderer defaultLocalConfig $ \unitTest ->
-    declare "NON UNIT TEST" (exampleNonUnitTest Debug.trace) viaShowRenderer defaultLocalConfig $ \nonUnitTest -> compose $ do
+    declare "NON UNIT TEST" (exampleNonUnitTest (const id)) viaShowRenderer defaultLocalConfig $ \nonUnitTest ->
+    declare "PROPERTY TEST" (exampleNonUnitTestWithRandomness (const id)) viaShowRenderer defaultLocalConfig $ \propertyTest ->
+    compose $ do
       b <- check unitTest 142
       check nonUnitTest ()
       -- For some reason, having a `() <-` can cause rewrite rules to not fire,
@@ -205,6 +208,7 @@ main = do
       bracket (takeMVar mvar) (putMVar mvar) $ \_ -> do
         assert unitTest 142
       effect (putStrLn $ "Passed? " ++ show b)
+      check propertyTest ()
       assert nonUnitTest ()
       -- Why do we bother with composite/declare?
       -- After all, we can still run properties directly, and even via quickCheck
