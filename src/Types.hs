@@ -13,16 +13,19 @@ module Types
   , that
   , runConjunction
 
+  -- * Counterexample
+  , Counterexample (..)
+
   -- * Re-export
   , Natural
   ) where
 
 import Prelude hiding (id, (.))
-import Control.Arrow (Kleisli (..))
-import Control.Category
-import Numeric.Natural (Natural)
 import Data.Functor.Contravariant
+import Numeric.Natural (Natural)
 import Location (HasCallStack, MaybeSrcLoc, srcLocOf, callStack)
+import Space.Random (Seed)
+import Data.List.NonEmpty (NonEmpty)
 
 -- | A test subject: given the static and dynamic (from the search space) parts,
 -- come up with a result. Meaningful in relation to 'Verification' and
@@ -91,3 +94,20 @@ that r f = Assert (Expectation (srcLocOf callStack) (Refutation r) (Verification
 runConjunction :: Semigroup s => (f t -> s) -> Conjunction f t -> s
 runConjunction k (Assert f) = k f
 runConjunction k (And l r) = runConjunction k l <> runConjunction k r
+
+-- | A counterexample produced by a property test. It gives the random seed and
+-- search space, and also the value that was produced by the generator at this
+-- point (even though it can be reproduced). It also has the non-empty set of
+-- refutations, corresponding to the expectations which failed at this point.
+data Counterexample space dynamic refutation = Counterexample
+  -- May as well be strict in all fields since they've already been computed
+  -- or else we wouldn't have a counterexample.
+  { randomSeed :: !Seed
+  , searchPoint :: !space
+  , dynamicPart :: !dynamic
+  , refutations :: !(NonEmpty refutation)
+  }
+
+-- TODO remove this show instace; give a library with pretty-printers.
+instance Show (Counterexample space dynamic refutation) where
+  show = const "Counterexample"

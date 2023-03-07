@@ -91,28 +91,7 @@ instance Show (QuickCheck space dynamic refutation) where
     , showSeedHex seed
     ]
   show (Failed _ seed counterexample) = mconcat
-    [ "Found counterexample from initial seed ", showSeedHex seed, "\n"
-    , T.unpack (prettyCounterexample counterexample)
-    ]
-
--- | A counterexample produced by a property test. It gives the random seed and
--- search space, and also the value that was produced by the generator at this
--- point (even though it can be reproduced). It also has the non-empty set of
--- refutations, corresponding to the expectations which failed at this point.
-data Counterexample space dynamic refutation = Counterexample
-  { randomSeed :: Seed
-  , searchPoint :: space
-  , dynamicPart :: dynamic
-  , refutations :: NonEmpty refutation
-  }
-
--- TODO
-instance Show (Counterexample space dynamic refutation) where
-  show = const "Counterexample"
-
--- TODO
-prettyCounterexample :: Counterexample space dynamic refutation -> Text
-prettyCounterexample _ = mempty
+    [ "Found counterexample from initial seed ", showSeedHex seed ]
 
 {-# INLINE checkSequentialAll #-}
 -- | Check the property at each of these seeds, giving all counterexamples.
