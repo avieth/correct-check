@@ -291,9 +291,6 @@ runCompositeCheck env gconf tvar (Composite k) = k (\srcLoc (Check f) -> f env g
 -- of the property up to the determination of whether it passes or not.
 check :: HasCallStack => property x -> x -> Composite property Bool
 check prop x = Composite $ \k -> k (srcLocOf callStack) prop x >>= evaluate
--- TODO future direction here: take the SrcLoc of the check call, and pass
--- it to the property evaluation function to allow for it to be stored in the
--- test results.
 
 -- | 'check' but stops the test if it's a failure.
 assert :: HasCallStack => property x -> x -> Composite property ()
@@ -331,14 +328,14 @@ declare name prop renderer lconf k = Declaration $ \toProperty ->
 -- | Takes the source location of the declaration, and also of the call to
 -- check/assert.
 {-# INLINE checkOne #-}
-checkOne :: String
-         -> MaybeSrcLoc
+checkOne :: String -- ^ Name of the declaration
+         -> MaybeSrcLoc -- ^ Location of the declaration
          -> Property state space dynamic result refutation t
          -> Renderer state space dynamic result refutation t
          -> LocalConfig
          -> Env
          -> GlobalConfig
-         -> MaybeSrcLoc
+         -> MaybeSrcLoc -- ^ Location of the call to check within the Composite
          -> TVar CheckState
          -> t
          -> IO Bool
