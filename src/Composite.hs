@@ -82,7 +82,6 @@ data CheckState = CheckState
   }
 
 -- | Creates a new TVar for the state.
-{-# INLINE initialCheckStateIO #-}
 initialCheckStateIO :: Seed -> IO (TVar CheckState)
 initialCheckStateIO seed = newTVarIO $ CheckState
   { checkStateSeed = seed
@@ -90,7 +89,6 @@ initialCheckStateIO seed = newTVarIO $ CheckState
   }
 
 -- | Split the seed, update it with one half, and return the other half.
-{-# INLINE splitStateSeed #-}
 splitStateSeed :: TVar CheckState -> STM Seed
 splitStateSeed tvar = do
   st <- readTVar tvar
@@ -99,7 +97,6 @@ splitStateSeed tvar = do
   pure s1
 
 -- | Include a test counterexample in the state.
-{-# INLINE addCounterexample #-}
 addCounterexample :: String -- ^ Name of declaration
                   -> MaybeSrcLoc -- ^ Of declaration site
                   -> MaybeSrcLoc -- ^ Of check site
@@ -117,7 +114,6 @@ addCounterexample name declSrcLoc checkSrcLoc renderer tvar t !cx = do
     }
 
 -- | Inlcude a test result. No change if it's a pass (Nothing).
-{-# INLINE addPropertyTestResult #-}
 addPropertyTestResult :: String -- ^ Name of declaration
                       -> MaybeSrcLoc -- ^ Of declaration site
                       -> MaybeSrcLoc -- ^ Of check site
@@ -381,6 +377,7 @@ data StopTestEarly = StopTestEarly
 deriving instance Show StopTestEarly
 instance Exception StopTestEarly
 
+{-# INLINE stop #-}
 stop :: Composite property x
 stop = Composite $ \_ -> throwIO StopTestEarly
 
