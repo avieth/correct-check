@@ -129,7 +129,7 @@ exampleNonUnitTest trace = Property
       }
   , test = Test
       { subject = Subject $ \_ n -> trace ("Evaluating non unit test at " ++ show n) (sum [1..n])
-      , expectations = that "Gauss was right" $ \_ n s -> s == n * (n + 1) `div` 2
+      , expectations = that "Gauss was right" $ \_ n s -> if n == 42 then False else (s == n * (n + 1) `div` 2)
       }
   }
 
@@ -166,47 +166,50 @@ main = do
   --  quickCheck 131070 100 exampleUnitTest >>= print
   --  print (quickCheckAt 262140 100 exampleUnitTest (mkSMGen 42))
   --  print (checkSequential 100 (randomPoints 262140 (mkSMGen 42)) exampleUnitTest)
-  quickCheckParallel 8 (2 ^ 64) 102 exampleUnitTest >>= print
+  --quickCheckParallel 8 (2 ^ 32 - 1) 102 exampleUnitTest >>= print
   -- This one will do a search, but only at one random point, since the
   -- generator doesn't use the random seed.
-  quickCheck (2 ^ 64) () (exampleNonUnitTest Debug.trace) >>= print
+  --quickCheck (2 ^ 32 - 1) () (exampleNonUnitTest Debug.trace) >>= print
   -- Can't give a big list here, because we're going to have to search everything.
   -- quickCheckParallel 8 (2 ^ 16) () (exampleNonUnitTestWithRandomness (flip const)) >>= print
 
   -- A unit test will still simplify within a composite test.
   Debug.traceM "Begin composite test"
   mvar <- newMVar ()
-  result <- composite $ declare exampleUnitTest noMetadata $ \unitTest -> do
-    b <- check unitTest 142
-    -- For some reason, having a `() <-` can cause rewrite rules to not fire,
-    -- and the non-random test not to simplify enough.
-    --
-    -- It only happens if we write () literally. _ is fine, c is fine.
-    -- It's the thing on the RHS that doesn't get simplified.
-    --
-    -- This surely has something to do with some builtin GHC rule firing and
-    -- maybe causing GHC to not have any budget left to try our rules?
-    --
-    -- If we use 3 simplifier phases, it works.
-    effect (putStrLn $ "Passed? " ++ show b)
-    () <- assert unitTest 1042
-    check unitTest 142
-    bracket (takeMVar mvar) (putMVar mvar) $ \_ -> do
-      assert unitTest 142
-    effect (putStrLn $ "Passed? " ++ show b)
-    -- Why do we bother with composite/declare?
-    -- After all, we can still run properties directly, and even via quickCheck
-    -- because we can do IO for a new random seed.
-    --
-    -- Aside: even with -O0 GHC somehow figures out that it only needs to check
-    -- at one seed here.
-    -- effect (quickCheck (2 ^ 64) 200 exampleUnitTest >>= print)
-    effect (quickCheckParallel 8 (2 ^ 64) () (exampleNonUnitTest (Debug.trace)) >>= print)
-    effect (quickCheck (2 ^ 64) () (exampleNonUnitTestWithRandomness (Debug.trace)) >>= print)
-    -- The point of composite/declare is to put a barrier between the properties
-    -- that may be tested, and everything else. It ensures that the arbitrary IO
-    -- in the composite cannot interact with the TVar CheckState.
-    pure ()
+  result <- composite defaultGlobalConfig $
+    declare exampleUnitTest showMetadata defaultLocalConfig $ \unitTest ->
+    declare (exampleNonUnitTest Debug.trace) showMetadata defaultLocalConfig $ \nonUnitTest -> compose $ do
+      b <- check unitTest 142
+      assert nonUnitTest ()
+      -- For some reason, having a `() <-` can cause rewrite rules to not fire,
+      -- and the non-random test not to simplify enough.
+      --
+      -- It only happens if we write () literally. _ is fine, c is fine.
+      -- It's the thing on the RHS that doesn't get simplified.
+      --
+      -- This surely has something to do with some builtin GHC rule firing and
+      -- maybe causing GHC to not have any budget left to try our rules?
+      --
+      -- If we use 3 simplifier phases, it works.
+      effect (putStrLn $ "Passed? " ++ show b)
+      assert unitTest 1042
+      check unitTest 142
+      bracket (takeMVar mvar) (putMVar mvar) $ \_ -> do
+        assert unitTest 142
+      effect (putStrLn $ "Passed? " ++ show b)
+      -- Why do we bother with composite/declare?
+      -- After all, we can still run properties directly, and even via quickCheck
+      -- because we can do IO for a new random seed.
+      --
+      -- Aside: even with -O0 GHC somehow figures out that it only needs to check
+      -- at one seed here.
+      effect (quickCheck (2 ^ 32 - 1) 200 exampleUnitTest >>= print)
+      --effect (quickCheckParallel 8 (2 ^ 32 - 1) () (exampleNonUnitTest (Debug.trace)) >>= print)
+      --effect (quickCheck (2 ^ 8) () (exampleNonUnitTestWithRandomness (Debug.trace)) >>= print)
+      -- The point of composite/declare is to put a barrier between the properties
+      -- that may be tested, and everything else. It ensures that the arbitrary IO
+      -- in the composite cannot interact with the TVar CheckState.
+      pure ()
   -- The bracket within the composite ensures this will not block.
   takeMVar mvar
-  showTestResult result
+  printTestResult result

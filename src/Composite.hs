@@ -2,6 +2,7 @@ module Composite
   ( Declaration
   , composite
   , declare
+  , compose
 
   , Composite
   , effect
@@ -13,11 +14,17 @@ module Composite
   , StopTestEarly (..)
 
   , TestResult (..)
-  , showTestResult
-  , showSummary
+  , printTestResult
 
   , Metadata (..)
   , noMetadata
+  , showMetadata
+
+  , LocalConfig (..)
+  , GlobalConfig (..)
+  , Parallelism (..)
+  , defaultGlobalConfig
+  , defaultLocalConfig
   ) where
 
 import Control.Concurrent.STM hiding (check)
@@ -25,15 +32,19 @@ import Control.Exception (SomeException, Exception, evaluate, throwIO, try)
 import qualified Control.Exception as Exception
 import Control.Monad (ap, unless)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Location
 import Property
 import Types
 import Space.Random as Random
-import Driver (Counterexample, checkSequential)
+import Data.Foldable (toList)
+import Data.List (intercalate)
+import Data.Word (Word32)
+import Driver (checkParallel, checkSequential)
 import Data.Maybe (isNothing)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Data.Semigroup (All (..))
+import GHC.RTS.Flags (nCapabilities, getParFlags)
 
 -- | Will be held in a TVar for use in a composite property run.
 --
@@ -70,22 +81,31 @@ splitStateSeed tvar = do
 {-# INLINE addCounterexample #-}
 addCounterexample :: MaybeSrcLoc -- ^ Of declaration site
                   -> MaybeSrcLoc -- ^ Of check site
+                  -> Metadata state space dynamic result refutation static
                   -> TVar CheckState
+                  -> static
                   -> Counterexample space dynamic refutation
                   -> STM ()
-addCounterexample declSrcLoc checkSrcLoc tvar cx = do
+addCounterexample declSrcLoc checkSrcLoc meta tvar t !cx = do
   st <- readTVar tvar
-  writeTVar tvar $! st { checkStateFailingTests = checkStateFailingTests st Seq.|> FailingCase cx }
+  writeTVar tvar $! st
+    { checkStateFailingTests =
+               checkStateFailingTests st
+        Seq.|> FailingCase declSrcLoc checkSrcLoc meta t cx
+    }
 
 -- | Inlcude a test result. No change if it's a pass (Nothing).
 {-# INLINE addPropertyTestResult #-}
 addPropertyTestResult :: MaybeSrcLoc -- ^ Of declaration site
                       -> MaybeSrcLoc -- ^ Of check site
+                      -> Metadata state space dynamic result refutation static
                       -> TVar CheckState
+                      -> static
                       -> Maybe (Counterexample space dynamic refutation)
                       -> STM ()
-addPropertyTestResult declSrcLoc checkSrcLoc tvar =
-  maybe (pure ()) (addCounterexample declSrcLoc checkSrcLoc tvar)
+addPropertyTestResult declSrcLoc checkSrcLoc meta tvar t =
+  -- FIXME use the metadata.
+  maybe (pure ()) (addCounterexample declSrcLoc checkSrcLoc meta tvar t)
 
 -- | Well get this as the result of a composite test run.
 --
@@ -94,33 +114,67 @@ data TestResult where
   Normal :: Seed -> CheckState -> TestResult
   Exceptional :: Seed -> CheckState -> SomeException -> TestResult
 
-showSummary :: Seed -> CheckState -> IO ()
-showSummary initialSeed st = do
+printSummary :: Seed -> CheckState -> IO ()
+printSummary initialSeed st = do
   putStrLn $ mconcat
     [ "Initial random seed is ", showSeedHex initialSeed, "\n"
-    , "There were "
+    , "There ", verb, " "
     , show (Seq.length (checkStateFailingTests st))
-    , " counterexamples discovered."
+    , " ", noun, " discovered"
+    , if n == 0 then [] else mconcat ["\n", counterexamples]
     ]
+  where
+    n = Seq.length (checkStateFailingTests st)
+    (verb, noun) = if n == 1 then ("was", "counterexample") else ("were", "counterexamples")
+    counterexamples :: String
+    counterexamples = intercalate "\n" (fmap showFailingCase (toList (checkStateFailingTests st)))
 
-showNormalFooter :: IO ()
-showNormalFooter = putStrLn $ mconcat
-  [ "Ended normally"
+printNormalFooter :: IO ()
+printNormalFooter = putStrLn $ mconcat
+  [ "Ended normally" ]
+
+printExceptionalFooter :: SomeException -> IO ()
+printExceptionalFooter ex = putStrLn $ mconcat
+  [ "Ended with exception ", show ex ]
+
+printTestResult :: TestResult -> IO ()
+printTestResult (Normal initialSeed finalState) = do
+  printSummary initialSeed finalState
+  printNormalFooter
+printTestResult (Exceptional initialSeed finalState ex) = do
+  printSummary initialSeed finalState
+  printExceptionalFooter ex
+
+showFailingCase :: FailingCase -> String
+showFailingCase (FailingCase declSrcLoc checkSrcLoc meta staticPart cexample) = mconcat
+  [ "Declared at ", prettyMaybeSrcLoc declSrcLoc, "\n"
+  , "Checked at ", prettyMaybeSrcLoc checkSrcLoc, "\n"
+  , showCounterexample meta staticPart cexample
   ]
 
-showExceptionalFooter :: SomeException -> IO ()
-showExceptionalFooter ex = putStrLn $ mconcat
-  [ "Ended exceptionally\n"
-  , show ex
+showCounterexample :: Metadata state space dynamic result refutation static
+                   -> static
+                   -> Counterexample space dynamic refutation
+                   -> String
+showCounterexample meta staticPart cexample = mconcat
+  [ "Static part: ", maybeShow (metadataShowStatic meta) staticPart, "\n"
+  , "Random seed: ", showSeedHex (randomSeed cexample), "\n"
+  , "Dynamic part: ", maybeShow (metadataShowDynamic meta) (dynamicPart cexample), "\n"
+  , "Point: ", maybeShow (metadataShowSpace meta) (searchPoint cexample), "\n"
+  , "Refuted that: \n"
+  , intercalate "\n" (fmap (showRefutation meta) (toList (refutations cexample)))
   ]
 
-showTestResult :: TestResult -> IO ()
-showTestResult (Normal initialSeed finalState) = do
-  showSummary initialSeed finalState
-  showNormalFooter
-showTestResult (Exceptional initialSeed finalState ex) = do
-  showSummary initialSeed finalState
-  showExceptionalFooter ex
+showRefutation :: Metadata state space dynamic result refutation static
+               -> refutation
+               -> String
+showRefutation meta = maybeShow (metadataShowRefutation meta)
+
+maybeShow :: Maybe (t -> Text) -> t -> String
+maybeShow mshow t = case mshow of
+  Nothing -> "< cannot print  >"
+  Just k -> T.unpack (k t)
+
 
 -- | A composite is able to call some function that will check a property at a
 -- given point. The check gives a bool saying whether it passed, which allows
@@ -162,11 +216,16 @@ runCompositeAt k comp = runComposite comp k
 
 -- | The `property` parameter of 'Composite' will be instantiated to this in
 -- order to run a composite test.
-newtype Check t = Check (MaybeSrcLoc -> TVar CheckState -> t -> IO Bool)
+--
+-- There is the static environment, the global configuration, both of which come
+-- from the driver and not from the local property declaration.
+-- The MaybeSrcLoc is the place where the check was called in the composite (not
+-- where it was declared).
+newtype Check t = Check (Env -> GlobalConfig -> MaybeSrcLoc -> TVar CheckState -> t -> IO Bool)
 
 {-# INLINE runCompositeCheck #-}
-runCompositeCheck :: TVar CheckState -> Composite Check t -> IO t
-runCompositeCheck tvar (Composite k) = k (\srcLoc (Check f) -> f srcLoc tvar)
+runCompositeCheck :: Env -> GlobalConfig -> TVar CheckState -> Composite Check t -> IO t
+runCompositeCheck env gconf tvar (Composite k) = k (\srcLoc (Check f) -> f env gconf srcLoc tvar)
 
 -- | This will check a property within a composite. It will force the evaluation
 -- of the property up to the determination of whether it passes or not.
@@ -180,6 +239,8 @@ check prop x = Composite $ \k -> k (srcLocOf callStack) prop x >>= evaluate
 assert :: HasCallStack => property x -> x -> Composite property ()
 assert prop x = do
   b <- withFrozenCallStack (check prop x)
+  -- FIXME would be better to give an exception that shows it was an
+  -- assertion that caused the early exit?
   unless b stop
 
 -- TODO
@@ -189,61 +250,69 @@ assert prop x = do
 -- How about this style? CPS and no existential types.
 -- Also, the property is not in conjunction, you can only give one at a time.
 -- In this style of definition, that makes more sense anyway.
-newtype Declaration property = Declaration
-  { runDeclaration :: forall r .
-         (forall state space dynamic result refutation t . MaybeSrcLoc -> Property state space dynamic result refutation t -> Metadata state space dynamic result refutation t -> (property t -> Composite property ()) -> Composite property r)
-      -> Composite property r
-  }
 
--- INLINE on declare and composite is very important. Without it, GHC won't
--- optimize unit tests in composites.
+-- | Used to restrict the form of composite tests. The function 'composite'
+-- will eliminate this constructor, but requires that the type parameter
+-- `property` be universally quanitified (similar to the ST trick).
+newtype Declaration property = Declaration
+  { runDeclaration :: (forall r . Check r -> property r) -> Composite property () }
+
+-- INLINEs on compose, declare, and composite are very important. Without it,
+-- GHC won't be able to simplify unit tests in composites.
+
+{-# INLINE CONLIKE compose #-}
+compose :: Composite property () -> Declaration property
+compose comp = Declaration (\_ -> comp)
 
 -- | Declare a property, to allow for its use in a composite.
-{-# INLINE declare #-}
+{-# INLINE CONLIKE declare #-}
 declare :: HasCallStack
         => Property state space dynamic result refutation t
         -> Metadata state space dynamic result refutation t
-        -> (property t -> Composite property ())
+        -> LocalConfig
+        -> (property t -> Declaration property)
         -> Declaration property
-declare prop meta k = Declaration $ \f -> f (srcLocOf callStack) prop meta k
-
--- | Run a composite. Note the ST-style trick: only composites which do not
--- know anythig about the `property` type may be run.
-{-# INLINE composite #-}
-composite :: (forall property. Declaration property) -> IO TestResult
-composite decl = do
-  initialSeed <- Random.newSMGen
-  tvar <- initialCheckStateIO initialSeed
-  outcome <- try (runCompositeCheck tvar (runDeclaration decl runDeclarationWith))
-  finalState <- readTVarIO tvar
-  pure $ case outcome of
-    Left someException -> Exceptional initialSeed finalState someException
-    Right () -> Normal initialSeed finalState
-
--- | Gives the property, its metadata, and the source location of the
--- declaration itself (populated by a call to 'declare'), run a check.
-{-# INLINE runDeclarationWith #-}
-runDeclarationWith :: MaybeSrcLoc
-                   -> Property state space dynamic result refutation t
-                   -> Metadata state space dynamic result refutation t
-                   -> (Check t -> Composite Check ())
-                   -> Composite Check ()
-runDeclarationWith declSrcLoc prop meta k = k (Check (checkOne declSrcLoc prop))
+declare prop meta lconf k = Declaration $ \toProperty ->
+  runDeclaration (k (toProperty (Check (checkOne (srcLocOf callStack) prop meta lconf)))) toProperty
 
 -- | Takes the source location of the declaration, and also of the call to
 -- check/assert.
 {-# INLINE checkOne #-}
 checkOne :: MaybeSrcLoc
          -> Property state space dynamic result refutation t
+         -> Metadata state space dynamic result refutation t
+         -> LocalConfig
+         -> Env
+         -> GlobalConfig
          -> MaybeSrcLoc
          -> TVar CheckState
          -> t
          -> IO Bool
-checkOne declSrcLoc prop checkSrcLoc tvar t = do
+checkOne declSrcLoc prop meta lconf env gconf checkSrcLoc tvar t = do
   seed <- atomically (splitStateSeed tvar)
-  let result = checkSequential t (randomPoints 99 seed) prop
-  atomically (addPropertyTestResult declSrcLoc checkSrcLoc tvar result)
+  -- FIXME if the config asks for 0 random samples, we should quit. Just like
+  -- the quickCheck driver.
+  let n = max 1 (clampToWord32 (prettyMaybeSrcLoc declSrcLoc) (nsamples gconf lconf))
+      mp = fmap (clampToWord32 (prettyMaybeSrcLoc declSrcLoc)) (parallelism env gconf lconf)
+      result = case mp of
+        Nothing -> checkSequential t (randomPoints (n - 1) seed) prop
+        Just m -> checkParallel m t (randomPoints (n - 1) seed) prop
+  atomically (addPropertyTestResult declSrcLoc checkSrcLoc meta tvar t result)
   pure $! isNothing result
+
+-- | Run a composite. Note the ST-style trick: only composites which do not
+-- know anythig about the `property` type may be run.
+{-# INLINE composite #-}
+composite :: GlobalConfig -> (forall property. Declaration property) -> IO TestResult
+composite gconf decl = do
+  env <- mkEnv
+  initialSeed <- Random.newSMGen
+  tvar <- initialCheckStateIO initialSeed
+  outcome <- try (runCompositeCheck env gconf tvar (runDeclaration decl id))
+  finalState <- readTVarIO tvar
+  pure $ case outcome of
+    Left someException -> Exceptional initialSeed finalState someException
+    Right () -> Normal initialSeed finalState
 
 -- | A test will run all properties, even if some property has failed. It's
 -- possible to stop the property test eary by throwing an exception. The check
@@ -261,27 +330,107 @@ stop = Composite $ \_ -> throwIO StopTestEarly
 -- TODO define the metadata, to allow for communication to human eyes and
 -- possibly to machine-readable formats.
 data FailingCase where
-  FailingCase :: Counterexample space dynamic refutation -> FailingCase
+  FailingCase :: MaybeSrcLoc
+              -- ^ Of the declaration
+              -> MaybeSrcLoc
+              -- ^ Of the check
+              -> Metadata state space dynamic result refutation static
+              -> static
+              -> Counterexample space dynamic refutation
+              -> FailingCase
 
 -- | Information about the types of a property, useful for showing diagnostic
 -- information.
-data Metadata state space specimen result refutation param = Metadata
-  { metadataLocation :: MaybeSrcLoc -- ^ Of the property itself.
-  , metadataShowState :: Maybe (state -> Text)
+--
+data Metadata state space specimen result refutation static = Metadata
+  -- FIXME rename. It's not metadata.
+  { metadataShowState :: Maybe (state -> Text)
   , metadataShowSpace :: Maybe (space -> Text)
   , metadataShowDynamic :: Maybe (specimen -> Text)
   , metadataShowResult :: Maybe (result -> Text)
   , metadataShowRefutation :: Maybe (refutation -> Text)
-  , metadataShowParam :: Maybe (param -> Text)
+  , metadataShowStatic :: Maybe (static -> Text)
   }
 
-noMetadata :: Metadata state space dynamic result refutation param
+noMetadata :: Metadata state space dynamic result refutation static
 noMetadata = Metadata
-  { metadataLocation = UnknownLocation
-  , metadataShowState = Nothing
+  { metadataShowState = Nothing
   , metadataShowSpace = Nothing
   , metadataShowDynamic = Nothing
   , metadataShowResult = Nothing
   , metadataShowRefutation = Nothing
-  , metadataShowParam = Nothing
+  , metadataShowStatic = Nothing
   }
+
+showMetadata :: (Show state, Show space, Show dynamic, Show result, Show refutation, Show static)
+             => Metadata state space dynamic result refutation static
+showMetadata = Metadata
+  { metadataShowState = Just tshow
+  , metadataShowSpace = Just tshow
+  , metadataShowDynamic = Just tshow
+  , metadataShowResult = Just tshow
+  , metadataShowRefutation = Just tshow
+  , metadataShowStatic = Just tshow
+  }
+  where
+    tshow :: Show t => t -> Text
+    tshow = T.pack . show
+
+data Env = Env
+  { envCapabilities :: !Word32
+  }
+
+mkEnv :: IO Env
+mkEnv =  do
+  parFlags <- getParFlags
+  pure $ Env
+    { envCapabilities = nCapabilities parFlags
+    }
+
+-- | Configuration of a composite run overall.
+data GlobalConfig = GlobalConfig
+  { globalMaximumParallelism :: Maybe Parallelism
+  , globalMaximumRandomSamples :: Maybe Natural
+  }
+
+defaultGlobalConfig :: GlobalConfig
+defaultGlobalConfig= GlobalConfig
+  { globalMaximumParallelism = Nothing
+  , globalMaximumRandomSamples = Nothing
+  }
+
+-- | Configuration for a particular property.
+data LocalConfig = LocalConfig
+  { localParallelism :: Parallelism -- ^ How much paralleism?
+  , localRandomSamples :: Natural -- ^ How many random samples for this property?
+  }
+
+defaultLocalConfig :: LocalConfig
+defaultLocalConfig = LocalConfig
+  { localParallelism = NoParallelism
+  , localRandomSamples = 64
+  }
+
+nsamples :: GlobalConfig -> LocalConfig -> Natural
+nsamples gconf lconf = case globalMaximumRandomSamples gconf of
+  Nothing -> localRandomSamples lconf
+  Just n -> min n (localRandomSamples lconf)
+
+parallelismInEnv :: Env -> Parallelism -> Maybe Natural
+parallelismInEnv env prl = case prl of
+  NoParallelism -> Nothing
+  ConstantParallelism n -> Just n
+  DynamicParallelism k -> Just (k (fromIntegral (envCapabilities env)))
+
+parallelism :: Env -> GlobalConfig -> LocalConfig -> Maybe Natural
+parallelism env gconf lconf = do
+  requested <- parallelismInEnv env (localParallelism lconf)
+  Just $ case globalMaximumParallelism gconf >>= parallelismInEnv env of
+    Nothing -> requested
+    Just limited -> min requested limited
+
+data Parallelism where
+  NoParallelism :: Parallelism
+  ConstantParallelism :: Natural -> Parallelism
+  -- | Given the number of capabilities, decide the amount of parallelism.
+  DynamicParallelism :: (Natural -> Natural) -> Parallelism
