@@ -129,7 +129,15 @@ exampleNonUnitTest trace = Property
       }
   , test = Test
       { subject = Subject $ \_ n -> trace ("Evaluating non unit test at " ++ show n) (sum [1..n])
-      , expectations = that "Gauss was right" $ \_ n s -> if n == 42 then False else (s == n * (n + 1) `div` 2)
+      -- NB: a property test search will try to find a minimal example in which
+      -- _any_ of the expectations fail (it's a conjunction). It may find a
+      -- large example in which many fail, and then shrink it to one in which
+      -- only one of them fails.
+      -- Here they will both fail at 42, so they'll always both appear in the
+      -- report.
+      , expectations =
+             (that "Gauss was right" $ \_ n s -> if n == 42 then False else (s == n * (n + 1) `div` 2))
+          .& (that "Silly property" $ \_ n s -> if n == 42 then False else True)
       }
   }
 
@@ -177,10 +185,10 @@ main = do
   Debug.traceM "Begin composite test"
   mvar <- newMVar ()
   result <- composite defaultGlobalConfig $
-    declare exampleUnitTest showMetadata defaultLocalConfig $ \unitTest ->
-    declare (exampleNonUnitTest Debug.trace) showMetadata defaultLocalConfig $ \nonUnitTest -> compose $ do
+    declare "UNIT TEST" exampleUnitTest viaShowRenderer defaultLocalConfig $ \unitTest ->
+    declare "NON UNIT TEST" (exampleNonUnitTest Debug.trace) viaShowRenderer defaultLocalConfig $ \nonUnitTest -> compose $ do
       b <- check unitTest 142
-      assert nonUnitTest ()
+      check nonUnitTest ()
       -- For some reason, having a `() <-` can cause rewrite rules to not fire,
       -- and the non-random test not to simplify enough.
       --
@@ -197,6 +205,7 @@ main = do
       bracket (takeMVar mvar) (putMVar mvar) $ \_ -> do
         assert unitTest 142
       effect (putStrLn $ "Passed? " ++ show b)
+      assert nonUnitTest ()
       -- Why do we bother with composite/declare?
       -- After all, we can still run properties directly, and even via quickCheck
       -- because we can do IO for a new random seed.

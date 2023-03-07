@@ -50,16 +50,19 @@ instance Contravariant (Verification dynamic result) where
 -- been shown. To keep consistent with other testing library metaphors, a value
 -- of True means it has not been refuted (the test passes).
 data Expectation refutation dynamic result static where
-  Expectation :: MaybeSrcLoc -> Refutation refutation -> Verification dynamic result static -> Expectation refutation dynamic result static
+  Expectation :: Refutation refutation -> Verification dynamic result static -> Expectation refutation dynamic result static
 
 instance Contravariant (Expectation refutation dynamic result) where
   -- The source location of the original definition doesn't change after a
   -- contramap.
-  contramap f (Expectation mSrcLoc r v) = Expectation mSrcLoc r (contramap f v)
+  contramap f (Expectation r v) = Expectation r (contramap f v)
 
 -- | Indicates that some type acts as a refutation of an assertion. This will
 -- often be Text with a human-readable explanation.
-newtype Refutation refutation = Refutation { getRefutation :: refutation }
+data Refutation refutation = Refutation
+  { refutationLocation :: MaybeSrcLoc
+  , refutationLabel :: refutation
+  }
 
 deriving instance Show refutation => Show (Refutation refutation)
 
@@ -86,7 +89,7 @@ instance Semigroup (Conjunction f t) where
 infixr 1 .&
 
 that :: HasCallStack => refutation -> (t -> dynamic -> result -> Bool) -> Conjunction (Expectation refutation dynamic result) t
-that r f = Assert (Expectation (srcLocOf callStack) (Refutation r) (Verification f))
+that r f = Assert (Expectation (Refutation (srcLocOf callStack) r) (Verification f))
 
 -- TODO could probably speed things up by rewriting Conjunction in CPS. In
 -- practice, all of the conjunctions will be known statically and should be
@@ -99,15 +102,16 @@ runConjunction k (And l r) = runConjunction k l <> runConjunction k r
 -- search space, and also the value that was produced by the generator at this
 -- point (even though it can be reproduced). It also has the non-empty set of
 -- refutations, corresponding to the expectations which failed at this point.
-data Counterexample space dynamic refutation = Counterexample
+data Counterexample space dynamic result refutation = Counterexample
   -- May as well be strict in all fields since they've already been computed
   -- or else we wouldn't have a counterexample.
   { randomSeed :: !Seed
   , searchPoint :: !space
   , dynamicPart :: !dynamic
-  , refutations :: !(NonEmpty refutation)
+  , resultPart :: !result
+  , refutations :: !(NonEmpty (Refutation refutation))
   }
 
 -- TODO remove this show instace; give a library with pretty-printers.
-instance Show (Counterexample space dynamic refutation) where
+instance Show (Counterexample space dynamic result refutation) where
   show = const "Counterexample"

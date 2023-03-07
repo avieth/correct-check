@@ -1,3 +1,20 @@
+-- |
+-- = Composite property tests
+--
+-- When it comes to defining tests which may do IO, there's no point in trying
+-- to make the whole thing reproducible. Instead, we can define tests for
+-- side-effecting programs by composing pure property tests within IO, such that
+-- the static parameters of these properties may come from that IO, but the
+-- properties themselves are known statically without IO.
+--
+-- If we can show details of a counterexample on a terminal, and possibly in
+-- some machine-readable binary format, then we can reproduce every failing pure
+-- property in a failing composite IO property, even though the composite cannot
+-- itself be reproduced.
+--
+-- Pretty printing is defined in this module because a composite property isn't
+-- useful without it.
+
 module Composite
   ( Declaration
   , composite
@@ -16,9 +33,9 @@ module Composite
   , TestResult (..)
   , printTestResult
 
-  , Metadata (..)
-  , noMetadata
-  , showMetadata
+  , Renderer (..)
+  , noRenderer
+  , viaShowRenderer
 
   , LocalConfig (..)
   , GlobalConfig (..)
@@ -31,20 +48,24 @@ import Control.Concurrent.STM hiding (check)
 import Control.Exception (SomeException, Exception, evaluate, throwIO, try)
 import qualified Control.Exception as Exception
 import Control.Monad (ap, unless)
-import Data.Text (Text)
-import qualified Data.Text as T
 import Location
 import Property
 import Types
 import Space.Random as Random
 import Data.Foldable (toList)
-import Data.List (intercalate)
+import Data.List (intersperse)
+import Data.List.NonEmpty as NE (NonEmpty, nonEmpty)
 import Data.Word (Word32)
 import Driver (checkParallel, checkSequential)
 import Data.Maybe (isNothing)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import Data.String (fromString)
 import GHC.RTS.Flags (nCapabilities, getParFlags)
+import Prettyprinter (Doc)
+import qualified Prettyprinter as PP
+import Prettyprinter.Render.Terminal (AnsiStyle)
+import qualified Prettyprinter.Render.Terminal as PP.Ansi
 
 -- | Will be held in a TVar for use in a composite property run.
 --
@@ -79,33 +100,34 @@ splitStateSeed tvar = do
 
 -- | Include a test counterexample in the state.
 {-# INLINE addCounterexample #-}
-addCounterexample :: MaybeSrcLoc -- ^ Of declaration site
+addCounterexample :: String -- ^ Name of declaration
+                  -> MaybeSrcLoc -- ^ Of declaration site
                   -> MaybeSrcLoc -- ^ Of check site
-                  -> Metadata state space dynamic result refutation static
+                  -> Renderer state space dynamic result refutation static
                   -> TVar CheckState
                   -> static
-                  -> Counterexample space dynamic refutation
+                  -> Counterexample space dynamic result refutation
                   -> STM ()
-addCounterexample declSrcLoc checkSrcLoc meta tvar t !cx = do
+addCounterexample name declSrcLoc checkSrcLoc renderer tvar t !cx = do
   st <- readTVar tvar
   writeTVar tvar $! st
     { checkStateFailingTests =
                checkStateFailingTests st
-        Seq.|> FailingCase declSrcLoc checkSrcLoc meta t cx
+        Seq.|> FailingCase name declSrcLoc checkSrcLoc renderer t cx
     }
 
 -- | Inlcude a test result. No change if it's a pass (Nothing).
 {-# INLINE addPropertyTestResult #-}
-addPropertyTestResult :: MaybeSrcLoc -- ^ Of declaration site
+addPropertyTestResult :: String -- ^ Name of declaration
+                      -> MaybeSrcLoc -- ^ Of declaration site
                       -> MaybeSrcLoc -- ^ Of check site
-                      -> Metadata state space dynamic result refutation static
+                      -> Renderer state space dynamic result refutation static
                       -> TVar CheckState
                       -> static
-                      -> Maybe (Counterexample space dynamic refutation)
+                      -> Maybe (Counterexample space dynamic result refutation)
                       -> STM ()
-addPropertyTestResult declSrcLoc checkSrcLoc meta tvar t =
-  -- FIXME use the metadata.
-  maybe (pure ()) (addCounterexample declSrcLoc checkSrcLoc meta tvar t)
+addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar t =
+  maybe (pure ()) (addCounterexample name declSrcLoc checkSrcLoc renderer tvar t)
 
 -- | Well get this as the result of a composite test run.
 --
@@ -114,67 +136,116 @@ data TestResult where
   Normal :: Seed -> CheckState -> TestResult
   Exceptional :: Seed -> CheckState -> SomeException -> TestResult
 
-printSummary :: Seed -> CheckState -> IO ()
-printSummary initialSeed st = do
-  putStrLn $ mconcat
-    [ "Initial random seed is ", showSeedHex initialSeed, "\n"
-    , "There ", verb, " "
-    , show (Seq.length (checkStateFailingTests st))
-    , " ", noun, " discovered"
-    , if n == 0 then [] else mconcat ["\n", counterexamples]
+-- | To stdout.
+printDoc :: Doc AnsiStyle -> IO ()
+printDoc = PP.Ansi.putDoc
+
+printTestResult :: TestResult -> IO ()
+printTestResult = printDoc . ppTestResult
+
+ppTestResult :: TestResult -> Doc AnsiStyle
+ppTestResult tresult = case tresult of
+  Normal seed state -> PP.vsep
+    [ ppSummary seed state
+    , ppNormalFooter
     ]
+  Exceptional seed state ex -> PP.vsep
+    [ ppSummary seed state
+    , ppExceptionalFooter ex
+    ]
+
+ppNormalFooter :: Doc AnsiStyle
+ppNormalFooter = PP.annotate PP.Ansi.bold (fromString "Ended normally")
+
+ppExceptionalFooter :: SomeException -> Doc AnsiStyle
+ppExceptionalFooter ex =
+    PP.annotate PP.Ansi.bold
+  . PP.annotate (PP.Ansi.color PP.Ansi.Red)
+  . PP.hsep
+  $ [fromString "Ended with exception", PP.viaShow ex ]
+
+ppSummary :: Seed -> CheckState -> Doc AnsiStyle
+ppSummary initialSeed st = PP.annotate PP.Ansi.bold (PP.hsep
+  [ fromString "There"
+  , fromString verb
+  , PP.viaShow (Seq.length (checkStateFailingTests st))
+  , fromString noun
+  , fromString "discovered from initial random seed"
+  , PP.annotate (PP.Ansi.color PP.Ansi.Green) (fromString (showSeedHex initialSeed))
+  ]) <> failingSummary
   where
     n = Seq.length (checkStateFailingTests st)
     (verb, noun) = if n == 1 then ("was", "counterexample") else ("were", "counterexamples")
-    counterexamples :: String
-    counterexamples = intercalate "\n" (fmap showFailingCase (toList (checkStateFailingTests st)))
+    failingSummary = case NE.nonEmpty (toList (checkStateFailingTests st)) of
+      Nothing -> mempty
+      Just neFailingCases -> PP.line <> PP.indent 2 (ppFailingCases neFailingCases)
 
-printNormalFooter :: IO ()
-printNormalFooter = putStrLn $ mconcat
-  [ "Ended normally" ]
+ppFailingCases :: NonEmpty FailingCase -> Doc AnsiStyle
+ppFailingCases = mconcat . intersperse PP.line . fmap ppFailingCase . toList
 
-printExceptionalFooter :: SomeException -> IO ()
-printExceptionalFooter ex = putStrLn $ mconcat
-  [ "Ended with exception ", show ex ]
-
-printTestResult :: TestResult -> IO ()
-printTestResult (Normal initialSeed finalState) = do
-  printSummary initialSeed finalState
-  printNormalFooter
-printTestResult (Exceptional initialSeed finalState ex) = do
-  printSummary initialSeed finalState
-  printExceptionalFooter ex
-
-showFailingCase :: FailingCase -> String
-showFailingCase (FailingCase declSrcLoc checkSrcLoc meta staticPart cexample) = mconcat
-  [ "Declared at ", prettyMaybeSrcLoc declSrcLoc, "\n"
-  , "Checked at ", prettyMaybeSrcLoc checkSrcLoc, "\n"
-  , showCounterexample meta staticPart cexample
+ppFailingCase :: FailingCase -> Doc AnsiStyle
+ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderer staticPart cexample) = PP.vcat
+  [ PP.annotate PP.Ansi.bold (PP.annotate (PP.Ansi.color PP.Ansi.Red) (fromString name))
+  , PP.indent 2 $ PP.vsep
+    [ fromString "Declared at" PP.<+> PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc declSrcLoc)
+    , PP.hsep
+        [ fromString "Checked at "
+        , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc checkSrcLoc)
+        ]
+    , PP.indent 12 $ PP.hsep
+        [ fromString "with static part"
+        , PP.annotate (PP.Ansi.color PP.Ansi.Magenta) (PP.nest 2 (ppMaybe (renderStatic renderer) staticPart))
+        ]
+    , fromString "Refuted" PP.<+> PP.indent 4 (ppCounterexample renderer cexample)
+      -- TODO Under here show the space, dynamic part, random seed, and list of
+      -- refutations
+    ]
   ]
 
-showCounterexample :: Metadata state space dynamic result refutation static
-                   -> static
-                   -> Counterexample space dynamic refutation
-                   -> String
-showCounterexample meta staticPart cexample = mconcat
-  [ "Static part: ", maybeShow (metadataShowStatic meta) staticPart, "\n"
-  , "Random seed: ", showSeedHex (randomSeed cexample), "\n"
-  , "Dynamic part: ", maybeShow (metadataShowDynamic meta) (dynamicPart cexample), "\n"
-  , "Point: ", maybeShow (metadataShowSpace meta) (searchPoint cexample), "\n"
-  , "Refuted that: \n"
-  , intercalate "\n" (fmap (showRefutation meta) (toList (refutations cexample)))
+ppCounterexample :: Renderer state space dynamic result refutation static
+                 -> Counterexample space dynamic result refutation
+                 -> Doc AnsiStyle
+ppCounterexample renderer cexample = PP.vsep
+  [ PP.vsep (fmap (ppRefutation renderer) (toList (refutations cexample)))
+  , PP.hsep
+    [ fromString "with random seed"
+    , PP.annotate (PP.Ansi.color PP.Ansi.Green) (fromString (showSeedHex (randomSeed cexample)))
+    ]
+  , PP.hsep
+    [ fromString "and search part"
+    , PP.hang 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Magenta) (ppMaybe (renderSpace renderer) (searchPoint cexample))
+    ]
+  , PP.hsep
+    [ fromString "generating dynamic part"
+    , PP.hang 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Green) (ppMaybe (renderDynamic renderer) (dynamicPart cexample))
+    ]
+  , PP.hsep
+    [ fromString "yielding result"
+    , PP.hang 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Blue) (ppMaybe (renderResult renderer) (resultPart cexample))
+    ]
   ]
 
-showRefutation :: Metadata state space dynamic result refutation static
-               -> refutation
-               -> String
-showRefutation meta = maybeShow (metadataShowRefutation meta)
+ppRefutation :: Renderer state space dynamic result refutation static
+             -> Refutation refutation
+             -> Doc AnsiStyle
+ppRefutation renderer refutation = PP.hsep
+  [ PP.annotate (PP.Ansi.color PP.Ansi.Red) (ppMaybe (renderRefutation renderer) (refutationLabel refutation))
+  , fromString "at"
+  , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc (refutationLocation refutation))
+  ]
 
-maybeShow :: Maybe (t -> Text) -> t -> String
-maybeShow mshow t = case mshow of
-  Nothing -> "< cannot print  >"
-  Just k -> T.unpack (k t)
+  {-
+ppIntercalateLines :: [Doc AnsiStyle] -> Doc AnsiStyle
+ppIntercalateLines = mconcat . intersperse line
+  where
+    line :: Doc AnsiStyle
+    line = PP.line <> fromString "-------------------------" <> PP.line
+-}
 
+ppMaybe :: Maybe (t -> Doc ann) -> t -> Doc ann
+ppMaybe mPp t = case mPp of
+  Nothing -> fromString "< cannot print  >"
+  Just k -> k t
 
 -- | A composite is able to call some function that will check a property at a
 -- given point. The check gives a bool saying whether it passed, which allows
@@ -198,13 +269,6 @@ effect io = Composite $ \_ -> io
 
 bracket :: IO r -> (r -> IO ()) -> (r -> Composite property t) -> Composite property t
 bracket acquire release k = Composite $ \l -> Exception.bracket acquire release (runCompositeAt l . k)
-{-
-bracket acquire release k = Composite $ \l -> Exception.mask $ \restore -> do
-  r <- acquire
-  t <- restore (runComposite (k r) l) `Exception.onException` release r
-  release r
-  pure t
--}
 
 -- TODO would probably want to give MonadIO and UnliftIO instances, for maximum
 -- compatibility.
@@ -243,14 +307,6 @@ assert prop x = do
   -- assertion that caused the early exit?
   unless b stop
 
--- TODO
--- Would actually require some config options, like parallelism, number of
--- tests, etc.
-
--- How about this style? CPS and no existential types.
--- Also, the property is not in conjunction, you can only give one at a time.
--- In this style of definition, that makes more sense anyway.
-
 -- | Used to restrict the form of composite tests. The function 'composite'
 -- will eliminate this constructor, but requires that the type parameter
 -- `property` be universally quanitified (similar to the ST trick).
@@ -267,20 +323,22 @@ compose comp = Declaration (\_ -> comp)
 -- | Declare a property, to allow for its use in a composite.
 {-# INLINE CONLIKE declare #-}
 declare :: HasCallStack
-        => Property state space dynamic result refutation t
-        -> Metadata state space dynamic result refutation t
+        => String
+        -> Property state space dynamic result refutation t
+        -> Renderer state space dynamic result refutation t
         -> LocalConfig
         -> (property t -> Declaration property)
         -> Declaration property
-declare prop meta lconf k = Declaration $ \toProperty ->
-  runDeclaration (k (toProperty (Check (checkOne (srcLocOf callStack) prop meta lconf)))) toProperty
+declare name prop renderer lconf k = Declaration $ \toProperty ->
+  runDeclaration (k (toProperty (Check (checkOne name (srcLocOf callStack) prop renderer lconf)))) toProperty
 
 -- | Takes the source location of the declaration, and also of the call to
 -- check/assert.
 {-# INLINE checkOne #-}
-checkOne :: MaybeSrcLoc
+checkOne :: String
+         -> MaybeSrcLoc
          -> Property state space dynamic result refutation t
-         -> Metadata state space dynamic result refutation t
+         -> Renderer state space dynamic result refutation t
          -> LocalConfig
          -> Env
          -> GlobalConfig
@@ -288,16 +346,16 @@ checkOne :: MaybeSrcLoc
          -> TVar CheckState
          -> t
          -> IO Bool
-checkOne declSrcLoc prop meta lconf env gconf checkSrcLoc tvar t = do
+checkOne name declSrcLoc prop renderer lconf env gconf checkSrcLoc tvar t = do
   seed <- atomically (splitStateSeed tvar)
   -- FIXME if the config asks for 0 random samples, we should quit. Just like
   -- the quickCheck driver.
-  let n = max 1 (clampToWord32 (prettyMaybeSrcLoc declSrcLoc) (nsamples gconf lconf))
-      mp = fmap (clampToWord32 (prettyMaybeSrcLoc declSrcLoc)) (parallelism env gconf lconf)
+  let n = max 1 (clampToWord32 (showMaybeSrcLoc declSrcLoc) (nsamples gconf lconf))
+      mp = fmap (clampToWord32 (showMaybeSrcLoc declSrcLoc)) (parallelism env gconf lconf)
       result = case mp of
         Nothing -> checkSequential t (randomPoints (n - 1) seed) prop
         Just m -> checkParallel m t (randomPoints (n - 1) seed) prop
-  atomically (addPropertyTestResult declSrcLoc checkSrcLoc meta tvar t result)
+  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar t result)
   pure $! isNothing result
 
 -- | Run a composite. Note the ST-style trick: only composites which do not
@@ -326,55 +384,52 @@ instance Exception StopTestEarly
 stop :: Composite property x
 stop = Composite $ \_ -> throwIO StopTestEarly
 
--- | Counterexample with metadata.
--- TODO define the metadata, to allow for communication to human eyes and
--- possibly to machine-readable formats.
+-- | Counterexample with extra information about where it came from.
 data FailingCase where
-  FailingCase :: MaybeSrcLoc
+  FailingCase :: String
+              -> MaybeSrcLoc
               -- ^ Of the declaration
               -> MaybeSrcLoc
               -- ^ Of the check
-              -> Metadata state space dynamic result refutation static
+              -> Renderer state space dynamic result refutation static
               -> static
-              -> Counterexample space dynamic refutation
+              -> Counterexample space dynamic result refutation
               -> FailingCase
 
--- | Information about the types of a property, useful for showing diagnostic
--- information.
---
-data Metadata state space specimen result refutation static = Metadata
-  -- FIXME rename. It's not metadata.
-  { metadataShowState :: Maybe (state -> Text)
-  , metadataShowSpace :: Maybe (space -> Text)
-  , metadataShowDynamic :: Maybe (specimen -> Text)
-  , metadataShowResult :: Maybe (result -> Text)
-  , metadataShowRefutation :: Maybe (refutation -> Text)
-  , metadataShowStatic :: Maybe (static -> Text)
+-- | Rendering information about the types of a property, useful for showing
+-- diagnostic information.
+data Renderer state space specimen result refutation static = Renderer
+  { renderState :: forall ann . Maybe (state -> Doc ann)
+  , renderSpace :: forall ann . Maybe (space -> Doc ann)
+  , renderDynamic :: forall ann . Maybe (specimen -> Doc ann)
+  , renderResult :: forall ann . Maybe (result -> Doc ann)
+  , renderRefutation :: forall ann . Maybe (refutation -> Doc ann)
+  , renderStatic :: forall ann . Maybe (static -> Doc ann)
   }
 
-noMetadata :: Metadata state space dynamic result refutation static
-noMetadata = Metadata
-  { metadataShowState = Nothing
-  , metadataShowSpace = Nothing
-  , metadataShowDynamic = Nothing
-  , metadataShowResult = Nothing
-  , metadataShowRefutation = Nothing
-  , metadataShowStatic = Nothing
+noRenderer :: Renderer state space dynamic result refutation static
+noRenderer = Renderer
+  { renderState = Nothing
+  , renderSpace = Nothing
+  , renderDynamic = Nothing
+  , renderResult = Nothing
+  , renderRefutation = Nothing
+  , renderStatic = Nothing
   }
 
-showMetadata :: (Show state, Show space, Show dynamic, Show result, Show refutation, Show static)
-             => Metadata state space dynamic result refutation static
-showMetadata = Metadata
-  { metadataShowState = Just tshow
-  , metadataShowSpace = Just tshow
-  , metadataShowDynamic = Just tshow
-  , metadataShowResult = Just tshow
-  , metadataShowRefutation = Just tshow
-  , metadataShowStatic = Just tshow
+viaShowRenderer :: (Show state, Show space, Show dynamic, Show result, Show refutation, Show static)
+                  => Renderer state space dynamic result refutation static
+viaShowRenderer = Renderer
+  { renderState = Just tshow
+  , renderSpace = Just tshow
+  , renderDynamic = Just tshow
+  , renderResult = Just tshow
+  , renderRefutation = Just tshow
+  , renderStatic = Just tshow
   }
   where
-    tshow :: Show t => t -> Text
-    tshow = T.pack . show
+    tshow :: Show t => t -> Doc ann
+    tshow = PP.viaShow
 
 data Env = Env
   { envCapabilities :: !Word32
