@@ -92,7 +92,7 @@ initialCheckStateIO seed = newTVarIO $ CheckState
 splitStateSeed :: TVar CheckState -> STM Seed
 splitStateSeed tvar = do
   st <- readTVar tvar
-  let (s1, s2) = Random.split_ (checkStateSeed st)
+  let (s1, s2) = Random.splitTuple (checkStateSeed st)
   writeTVar tvar $! st { checkStateSeed = s2 }
   pure s1
 

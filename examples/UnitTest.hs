@@ -1,5 +1,3 @@
---module UnitTest where
-
 import Control.Concurrent.MVar
 import Data.Maybe (mapMaybe)
 import Composite
@@ -7,6 +5,8 @@ import Driver
 import Property
 import Space
 import Types
+import Data.Word (Word8)
+import System.Environment (getArgs)
 
 import qualified Debug.Trace as Debug
 
@@ -121,7 +121,7 @@ exampleNonUnitTest :: (forall t. String -> t -> t) -> Property () Natural Int In
 exampleNonUnitTest trace = Property
   { domain = Domain
       { search = Search
-          { strategy = hedgehogSearchStrategy
+          { strategy = linearSearchStrategy 3 0 200
           , initialState = ()
           , minimalSpace = 0
           }
@@ -136,8 +136,8 @@ exampleNonUnitTest trace = Property
       -- Here they will both fail at 42, so they'll always both appear in the
       -- report.
       , expectations =
-             (that "Gauss was right" $ \_ n s -> if n == 142 then False else (s == n * (n + 1) `div` 2))
-          .& (that "Silly property" $ \_ n s -> if n == 142 then False else True)
+             (that "Gauss was right" $ \_ n s -> if n >= 142 then False else (s == n * (n + 1) `div` 2))
+          .& (that "Silly property" $ \_ n s -> if n >= 142 then False else True)
       }
   }
 
@@ -155,8 +155,42 @@ exampleNonUnitTestWithRandomness trace = base
   where
     base = exampleNonUnitTest trace
 
+-- Here's a property test which will search 2-dimensional space, checking that
+-- the static part is greater than the sum of squares of the search space, plus
+-- a small random number.
+--
+-- Since the search space is limited to 16 is one dimension and 32 in the other,
+-- for a parameter greaer than 1280, not every random sample point will yield a
+-- failing example. For a parameter greater than 1280 + 255 = 1535, it will
+-- never fail.
+--
+-- It's a silly property test, but it's enought to demonstrate that the driver
+-- is working.
+examplePropertyTest :: (forall t. String -> t -> t)
+                    -> Property ((), ()) (Natural, Natural) (Word8, Natural, Natural) Natural String Int
+examplePropertyTest trace = Property
+  { domain = Domain
+      { search = Search
+          { strategy = twoDimensionalSearchStrategy
+              (linearSearchStrategy 3 0 16)
+              (linearSearchStrategy 4 0 32)
+          , initialState = ((), ())
+          , minimalSpace = (0, 0)
+          }
+      , generate = do
+          (n, m) <- parameter
+          w8 <- genWord8
+          pure (w8, n, m)
+      }
+  , test = Test
+      { subject = Subject $ \_ (w8, n, m) -> n ^ 2 + m ^2 + fromIntegral w8
+      , expectations = (that "The threshold is greater" $ \t n s -> s < fromIntegral t)
+      }
+  }
+
 main :: IO ()
 main = do
+  [str1] <- getArgs
   -- Can we expect this to not force the entire list of seeds? Yes! Thanks
   -- to the rewrite rules of headOfList applied to a mapMaybeWithPoint or
   -- mapMaybeParallel on a constant function.
@@ -188,10 +222,14 @@ main = do
     composite defaultGlobalConfig $
     declare "UNIT TEST" exampleUnitTest viaShowRenderer defaultLocalConfig $ \unitTest ->
     declare "NON UNIT TEST" (exampleNonUnitTest (const id)) viaShowRenderer defaultLocalConfig $ \nonUnitTest ->
-    declare "PROPERTY TEST" (exampleNonUnitTestWithRandomness (const id)) viaShowRenderer defaultLocalConfig $ \propertyTest ->
+    declare "NON UNIT TEST WITH RANDOMNESS" (exampleNonUnitTestWithRandomness (const id)) viaShowRenderer defaultLocalConfig $ \nonUnitTestWithRandomness ->
+    declare "PROPERTY TEST" (examplePropertyTest (const id)) viaShowRenderer defaultLocalConfig $ \propertyTest ->
     compose $ do
       b <- check unitTest 142
-      check nonUnitTest ()
+      effect (putStrLn $ "Passed? " ++ show b)
+      assert unitTest 143
+      check unitTest 144
+      check propertyTest (read str1)
       -- For some reason, having a `() <-` can cause rewrite rules to not fire,
       -- and the non-random test not to simplify enough.
       --
@@ -202,27 +240,23 @@ main = do
       -- maybe causing GHC to not have any budget left to try our rules?
       --
       -- If we use 3 simplifier phases, it works.
-      effect (putStrLn $ "Passed? " ++ show b)
       assert unitTest 1042
       check unitTest 142
       bracket (takeMVar mvar) (putMVar mvar) $ \_ -> do
         assert unitTest 142
       effect (putStrLn $ "Passed? " ++ show b)
-      check propertyTest ()
+      check propertyTest 1280
       assert nonUnitTest ()
       -- Why do we bother with composite/declare?
       -- After all, we can still run properties directly, and even via quickCheck
       -- because we can do IO for a new random seed.
-      --
-      -- Aside: even with -O0 GHC somehow figures out that it only needs to check
-      -- at one seed here.
       effect (quickCheck (2 ^ 32 - 1) 200 exampleUnitTest >>= print)
-      --effect (quickCheckParallel 8 (2 ^ 32 - 1) () (exampleNonUnitTest (Debug.trace)) >>= print)
-      --effect (quickCheck (2 ^ 8) () (exampleNonUnitTestWithRandomness (Debug.trace)) >>= print)
       -- The point of composite/declare is to put a barrier between the properties
       -- that may be tested, and everything else. It ensures that the arbitrary IO
       -- in the composite cannot interact with the TVar CheckState.
       pure ()
-  -- The bracket within the composite ensures this will not block.
+  -- The bracket within the composite ensures this will not block, even if
+  -- unitTest failed at 142 and the assertion caused the composite to end
+  -- early.
   takeMVar mvar
   printTestResult result

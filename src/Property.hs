@@ -56,7 +56,7 @@ example_property :: Property () Natural [Word32] [Word32] String ()
 example_property = Property
   { domain = Domain
       { search = Search
-          { strategy = Search.hedgehogSearchStrategy
+          { strategy = Search.linearSearchStrategy 10 0 99
           , initialState = ()
           , minimalSpace = 0
           }

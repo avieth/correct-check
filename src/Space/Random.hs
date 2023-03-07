@@ -8,6 +8,7 @@ module Space.Random
   , parameter
 
   -- * Various generators
+  , genSeed
   , genWord8
   , genWord16
   , genWord32
@@ -26,7 +27,8 @@ module Space.Random
   , Seed
   , newSeedIO
   , split
-  , split_
+  , splitK
+  , splitTuple
   , splitN
   , splitUnfold
   , splitUnfoldN
@@ -88,13 +90,33 @@ instance Monad (Gen space) where
     unGen left smgen1 space $ \_smgen3 t ->
       unGen (k t) smgen2 space l
 
+-- | Use system entropy sources (uses System.Random.SplitMix.initSMGen)
+newSeedIO :: IO Seed
+newSeedIO = SM.initSMGen
+
+{-# INLINE CONLIKE sampleAt #-}
+sampleAt :: Seed -> space -> Gen space t -> t
+sampleAt seed space gen = unGen gen seed space $ \_ t -> t
+
+{-# INLINE CONLIKE sampleAt_ #-}
+sampleAt_ :: Gen space t -> Seed -> space -> t
+sampleAt_ gen seed = \space -> unGen gen seed space $ \_ t -> t
+
+-- | Picks a random seed. Intended for playing around / testing this library.
+sampleIO :: space -> Gen space t -> IO t
+sampleIO space gen = newSeedIO >>= \smgen -> pure (sampleAt smgen space gen)
+
 {-# INLINE split #-}
 split :: Seed -> (Seed -> Seed -> t) -> t
 split smgen k = let (g1, g2) = SM.splitSMGen smgen in k g1 g2
 
-{-# INLINE split_ #-}
-split_ :: Seed -> (Seed, Seed)
-split_ smgen = split smgen (,)
+{-# INLINE splitK #-}
+splitK :: (Seed -> Seed -> t) -> Seed -> t
+splitK = flip split
+
+{-# INLINE splitTuple #-}
+splitTuple :: Seed -> (Seed, Seed)
+splitTuple smgen = split smgen (,)
 
 -- | Takes the first n seeds from the infinite list of splitUnfold.
 --
@@ -150,29 +172,19 @@ randomPoints n g = RandomPoints
 -- @ 
 --   fromParameter . constant = pure
 -- @
-{-# INLINE fromParameter #-}
 fromParameter :: NonDecreasing space t -> Gen space t
 fromParameter f = Gen $ \smgen space k -> k smgen (nonDecreasing f space)
 
-{-# INLINE parameter #-}
+-- | Gives the space parameter itself. See also 'fromParameter'.
+--
+-- It's important that the space parameter is only used in a non-decreasing way,
+-- but we can't get much of a guarantee about this from the type checker.
 parameter :: Gen space space
 parameter = Gen $ \smgen space k -> k smgen space
 
--- | Use system entropy sources (uses System.Random.SplitMix.initSMGen)
-newSeedIO :: IO Seed
-newSeedIO = SM.initSMGen
-
-{-# INLINE CONLIKE sampleAt #-}
-sampleAt :: Seed -> space -> Gen space t -> t
-sampleAt seed space gen = unGen gen seed space $ \_ t -> t
-
-{-# INLINE CONLIKE sampleAt_ #-}
-sampleAt_ :: Gen space t -> Seed -> space -> t
-sampleAt_ gen seed = \space -> unGen gen seed space $ \_ t -> t
-
--- | Picks a random seed. Intended for playing around / testing this library.
-sampleIO :: space -> Gen space t -> IO t
-sampleIO space gen = newSeedIO >>= \smgen -> pure (sampleAt smgen space gen)
+-- | Splits the current seed and gives the first half.
+genSeed :: Gen space Seed
+genSeed = Gen $ \smgen _ k -> split smgen k
 
 genWord8 :: Gen space Word8
 genWord8 = Gen $ \smgen _ k -> let (w32, smgen') = SM.nextWord32 smgen in k smgen' (fromIntegral w32)

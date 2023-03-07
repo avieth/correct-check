@@ -11,215 +11,194 @@ module Space.Search
   , searchParallelAll
 
   -- * Various search strategies
+  , trviailSearchStrategy
   , unitSearchStrategy
-  , hedgehogSearchStrategy
+  , linearSearchStrategy
   , twoDimensionalSearchStrategy
   ) where
 
-import Control.Monad (guard)
+import Control.Applicative ((<|>))
 import qualified Control.Parallel.Strategies as Parallel
 import Data.List (unfoldr)
-import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Maybe (mapMaybe)
-import Data.Sequence (Seq)
-import qualified Data.Sequence as Seq
 import Data.Word (Word32)
 import Numeric.Natural (Natural)
 import Space.Random as Random
 import GHC.Base (build)
 
--- | Defines how to search an ordered space.
+-- | Defines how to search an ordered space. These may use random generators
+-- which do not depend upon any space (randomness only).
 --
 -- There may be arbitrarily-many minimally-more-complicated points, but the
--- strategy must pick a finite set of them to be searched next.
+-- strategy must pick a particular one to be searched next. It need not be
+-- minimally-more-complex; for example, a complication could go from 0 to 42
+-- in one jump.
 --
--- Dually, there may be arbitrarily-many maximally-less-compliacted points, but
--- the strategy must pick a finite set of them to be searched during the
--- shrinking phase.
+-- A similar notion of simplification is here too, but it should randomly
+-- choose a maximally-less-complicated point, because shrinking needs to go
+-- in minimal steps in order to work properly.
 data Strategy state space = Strategy
-  { complicate :: state -> space -> [(state, space)]
-  , simplify :: state -> space -> [(state, space)]
+  { complicate :: Seed -> state -> space -> Maybe (state, space)
+  -- ^ If Just, then the space must be strictly more complicated.
+  , simplify :: Seed -> state -> space -> [(state, space)]
+  -- ^ Every space must be strictly less complicated, but maximally so.
   }
 
--- TODO would it be worthwhile to allow for the strategy to use randomness?
--- Probably.
--- At the very least, runStrategy could be given a pseudorandom "pruning
--- function" which randomly filters the `complicate` list.
+-- | Never grows, never shrinks.
+trviailSearchStrategy :: Strategy state space
+trviailSearchStrategy = Strategy
+  { complicate = \_ _ _ -> Nothing
+  , simplify = \_ _ _ -> []
+  }
 
 -- | The only sensible way to search the single-element space.
 unitSearchStrategy :: Strategy state ()
-unitSearchStrategy = Strategy
-  { complicate = const (const [])
-  , simplify = const (const [])
-  }
+unitSearchStrategy = trviailSearchStrategy
 
--- | Increase by 1 up to some limit, then simplify by 1. Doesn't need any
--- state.
+-- | Similar to hedgehog: increases a single "size" parameter to an upper
+-- bound. This one is linear: you give a coefficient and a minimal value.
 --
-hedgehogSearchStrategy :: Strategy state Natural
-hedgehogSearchStrategy = Strategy
-  { complicate = \st n -> if n >= upperBound then [] else [(st, n+1)]
-  , simplify = \st n -> if n == 0 then [] else [(st, n-1)]
+--   y = c*x + b
+--
+-- where the first parameter is c, second is b. Third is the upper bound. This
+-- will never complicate to above the upper bound, and never simplify to below
+-- the lower bound.
+--
+-- Note one key difference from hedgehog: a generator do not need to state an
+-- upper bound, but the search strategy does.
+--
+-- NB: using a coefficient of 1 may not be desirable, because it means shrinking
+-- is useless: the minimal failing case will always be found on the way up.
+linearSearchStrategy :: Natural -> Natural -> Natural -> Strategy state Natural
+linearSearchStrategy c b upperBound = Strategy
+  { complicate = \_ st n -> if n >= upperBound then Nothing else Just (st, c * (n + 1))
+  , simplify = \_ st n -> if n <= b then [] else [(st, n-1)]
   }
-  -- Hedgehog uses 99 as the upper bound.
-  where upperBound = 99
 
--- | Increase uniformly up to some limit, then decrease either component.
-twoDimensionalSearchStrategy :: Natural -> Strategy state (Natural, Natural)
-twoDimensionalSearchStrategy upperBound = Strategy
-  { complicate = \st (n,m) -> do
-      -- Take all 3 complications, keep only those which don't break the
-      -- upper bound.
-      (n', m') <- complications n m
-      guard $ n' < upperBound
-      guard $ m' < upperBound
-      pure (st, (n', m'))
-  , simplify = \st (n,m) -> (,) st <$>
-     (if n == 0 && m == 0
-      then []
-      else if n == 0
-      then [(n, m-1)]
-      else if m == 0
-      then [(n-1, m)]
-      else [(n-1, m), (n, m-1)])
+-- Still not actually clear whether having the state parameter is useful at all.
+twoDimensionalSearchStrategy :: forall s1 s2 a b .
+                                Strategy s1 a
+                             -> Strategy s2 b
+                             -> Strategy (s1, s2) (a, b)
+twoDimensionalSearchStrategy first second = Strategy
+  { complicate = complicateProduct
+  , simplify = simplifyProduct
   }
   where
-    complications n m =
-      [ (n+1, m+1)
-      , (n+1, m)
-      , (n, m+1)
-      ]
+
+    -- These are the exact same form.
+
+    complicateProduct g (s1, s2) (x, y) = split g $ \g1 g2 ->
+      let l = complicate first  g1 s1 x
+          r = complicate second g2 s2 y
+          both = (\(s1, x) (s2, y) -> ((s1, s2), (x, y))) <$> l <*> r
+          onlyL = (\(s1, x) -> ((s1, s2), (x, y))) <$> l
+          onlyR = (\(s2, y) -> ((s1, s2), (x, y))) <$> r
+       in both <|> onlyL <|> onlyR
+
+    simplifyProduct g (s1, s2) (x, y) = split g $ \g1 g2 ->
+      let l = simplify first  g1 s1 x
+          r = simplify second g2 s2 y
+          both = (\(s1, x) (s2, y) -> ((s1, s2), (x, y))) <$> l <*> r
+          onlyL = (\(s1, x) -> ((s1, s2), (x, y))) <$> l
+          onlyR = (\(s2, y) -> ((s1, s2), (x, y))) <$> r
+       in both <|> onlyL <|> onlyR
 
 
--- No rule for pickFirstFailing (\_ -> Just r) because we ought to be able to
--- let that inline to headOfList . mapMaybe (pickFailing (\_ -> Just r)) and
--- then rewrite on that.
-
--- There are no rewrite rules for unfoldr in its defining module.
--- It does get INLINE though.
-
--- The idea would be that runStrategy is inlined and then fires the
--- mapMaybeConst rule.
--- But to get that, we need to have the "compliacte-then-simplify" part also
--- inline/simplify.
--- Could we do that by having the BFS complicate phase expressed as an unfoldr?
+-- | Use a strategy to find a minimal failing example. It's defined with this
+-- type and in this way so that it inlines well, given where and how it is called
+-- in 'searchSequentialAll' and 'searchParallelAll'.
+--
+-- The `space` given will not be simplified in case a failure is found here, and
+-- so it should always be a minimal space.
 {-# INLINE runStrategy #-}
 runStrategy :: forall state space failure .
                 Strategy state space
              -> state
+             -- ^ Start state for the search.
              -> space
-             -> (space -> Maybe failure)
+             -- ^ This is assumed to be a _minimal_ search space point.
+             -- If the test fails at the this point, it will not be shrunk.
+             -> (Seed -> space -> Maybe failure)
+             -> Seed
+             -- ^ Will be split and used in the search strategy, and also the
+             -- search predicate.
              -> Maybe (state, space, failure)
-runStrategy strategy state space p = fmap (simplifyDepthFirst (simplify strategy) p) failingPoint
-  where
-    -- Always apply it to the given state and space directly, rather than by
-    -- way of a list expression. Instead, complicateBreadthFirst gives the
-    -- search strictly after the initial state. This helps with simplification,
-    -- because
-    --   pickFirstFailing (const r) (x:_)
-    -- can always be rewritten.
-    failingPoint = pickFirstFailing p ((state, space) : complicateBreadthFirst (complicate strategy) state space)
+runStrategy strat initialState minimalSpace p = splitK $ \g1 g2 ->
+  -- splitK is used because it inlines well.
+  --
+  -- We're interested in the case where the function
+  --
+  --   p :: Seed -> space -> Maybe failure
+  --
+  -- is a constant, because in this case we can save some work. We never need to
+  -- run it at the complications, since we know the answer is the same for all of
+  -- them.
+  --
+  -- What's more, since we assume that this is called on the minimal search state,
+  -- we don't need to do any shrinking in this case either.
+  --
+  -- So the goal is that
+  --
+  --   runStrategy strat state space (\_ _ c)
+  --
+  -- would simplify to
+  --
+  --   \_ -> fmap (\failure -> (state, space, failure)) c
+  --
+  -- and therefore that its application to a mapMaybeWithPoint or mapMaybeParallel
+  -- in searchSequentialAll and searchParallelAll would trigger one of the rewrite
+  -- rules
+  --
+  --   "headOfListMapMaybeWithPointConst1"
+  --   "headOfListMapMaybeParallelConst1"
+  --
+  -- and therefore that checking a unit test will skip the random sample
+  -- generation and evaluate the test at most once.
+  let f = p g1
+      here = f minimalSpace
+      others = searchStrategyNonMinimal (complicate strat) (simplify strat) f (g2, (initialState, minimalSpace))
+      -- The idea is that if p is constant, then GHC will float it out and
+      -- we'll be left with a constant function which does this case on the
+      -- let-floated value `here`.
+   in case here of
+        Just failure -> Just (initialState, minimalSpace, failure)
+        Nothing -> takeFirst others
 
--- INLINE phase 2 or later, so that we give the RULES a chance to fire.
-{-# INLINE [2] pickFailing #-}
--- |
--- Need to have this simplify/rewrite as follows
--- 
---     pickFailing (const Nothing) xs
---   = Nothing
+-- | Uses the complicate function until a failing case is found, then uses
+-- the simplify function to minimze it.
 --
-pickFailing :: (space -> Maybe failure) -> (state, space) -> Maybe (state, space, failure)
-pickFailing p x = do
-  y <- p (snd x)
-  pure (fst x, snd x, y)
-
--- INLINE phase 2 or later, so that we give the RULES a chance to fire.
-{-# INLINE [2] pickFirstFailing #-}
--- The rule pickFailingConstNothing will be applicable to an inlining of this,
--- in case p = const Nothing. That would leave us with
---
---   headOfList . mapMaybe (const Nothing)
---
--- which can be re-written to
---
---   headOfList . const []
---
--- which hopefully can be inlined/rewritten to
---
---   const Nothing
---
-pickFirstFailing :: (space -> Maybe failure) -> [(state, space)] -> Maybe (state, space, failure)
-pickFirstFailing p = headOfList . mapMaybe (pickFailing p)
-
-{-# INLINE complicateBreadthFirst #-}
--- | Breadth-first search of complications according to the strategy. The
--- given state and space values are the initial search point, and will not be
--- included in the resulting list.
-complicateBreadthFirst :: (state -> space -> [(state, space)]) -> state -> space -> [(state, space)]
-complicateBreadthFirst complicate state space = unfoldr 
-  (\bfsQueue -> case bfsQueue of
-    Seq.Empty -> Nothing
-    (state, space) Seq.:<| bfsQueue -> Just ((state, space), bfsQueue <> Seq.fromList (complicate state space))
+-- The state and space given are assumed to already have been checked.
+{-# INLINE searchStrategyNonMinimal #-}
+searchStrategyNonMinimal :: (Seed -> state -> space -> Maybe (state, space))
+                         -> (Seed -> state -> space -> [(state, space)])
+                         -> (space -> Maybe failure)
+                         -> (Seed, (state, space))
+                         -> [Maybe (state, space, failure)]
+searchStrategyNonMinimal complicate simplify p = unfoldr
+  (\(g, (state, space)) -> split g $ \g1 g2 -> do
+    -- Only stops when complicate gives Nothing.
+    (state', space') <- complicate g1 state space
+    let next = (g2, (state', space'))
+    Just $ case p space' of
+      -- No failure? Continue the unfold.
+      Nothing -> (Nothing, next)
+      -- Failure? Minimize it.
+      -- The same seed is given to both; minimize will split it.
+      Just failure -> (Just (minimize simplify p next failure), next)
   )
-  (Seq.fromList (complicate state space))
 
-{-# INLINE simplifyDepthFirst #-}
--- Want GHC to be able to rewrite like so
---
---     simplifyDepthFirst strategy (const r) x
---   = fmap (\failure -> (fst x, snd x, failure)) r
---
--- Can we get that without writing a new rule?
---
--- More subtle that that, though: if it's const Nothing then it should indeed
--- simplify like that, but if it's const (Just t) then the strategy does has to
--- run the simplifier through. But if the simplifier is const (const []) then
--- it should fuse more.
---
--- So what can we do? Depth-first seems right, but not the usual meaning of
--- depth-first as in search, just depth-first single-path according to the
--- function p.
---
--- Can we express this as a mapMaybe over all simplifications? I don't think so,
--- because unlike complications, the simplification search is directed by the
--- predicate.
--- Really what we want is that whenever the simplify function is
---   const (const [])
--- then this function simplifies to id, no matter the predicate
---   simplifyDepthFirst (const (const [])) p x = x
--- because in this case, p will never be applied!
---
--- So, as an unfoldr? Take all of the simplifcations and pick the first that
--- fails.
---
---
--- In case we have a const Just or const Nothing test, simplifications and
--- complications will be skipped. This is all we need for unit tests to simplify
--- well.
--- Furthermore, if simplification is const (const []) then we would
--- expect
-simplifyDepthFirst :: (state -> space -> [(state, space)])
-                   -> (space -> Maybe failure)
-                   -> (state, space, failure)
-                   -> (state, space, failure)
-simplifyDepthFirst simplify p = goSimplify
-  where
-    goSimplify (state, space, failure) = case pickFirstFailing p (simplify state space) of
-      Nothing -> (state, space, failure)
-      Just simplified -> goSimplify simplified
-
--- | Used in 'searchSequentialAll' and 'searchParallelAll' as an argument to
--- 'mapMaybe' or 'mapMaybeParallel'. It's important that this function inlines
--- well, to allow for rewrite rules.
-{-# INLINE searchFunction #-}
-searchFunction :: Strategy state space
-               -> state
-               -> space
-               -> (Seed -> space -> Maybe failure)
-               -> Seed
-               -> Maybe (Seed, (state, space, failure))
-searchFunction strategy state space p = withPoint (runStrategy strategy state space . p)
+{-# INLINE minimize #-}
+minimize :: (Seed -> state -> space -> [(state, space)])
+         -> (space -> Maybe failure)
+         -> (Seed, (state, space))
+         -> failure
+         -> (state, space, failure)
+minimize simplify p (g, (state, space)) failure = split g $ \g1 g2 ->
+  case pickFirstFailing p (simplify g1 state space) of
+    Nothing -> (state, space, failure)
+    Just (state', smallerSpace, failure') -> minimize simplify p (g2, (state', smallerSpace)) failure'
 
 -- Note about rewrite rules.
 --
@@ -241,8 +220,6 @@ searchFunction strategy state space p = withPoint (runStrategy strategy state sp
 --       (s:_) -> case r of
 --         Nothing -> Nothing
 --         Just y -> (s, y)
---
-
 {-# RULES
 "headOfListMapMaybeWithPointConst1" forall r xs .
     headOfList (mapMaybeWithPoint (\_ -> r) xs)
@@ -286,7 +263,7 @@ searchSequentialAll :: forall state space failure .
                     -> RandomPoints
                     -> [(Seed, (state, space, failure))]
 searchSequentialAll strategy initialState startSpace p =
-    mapMaybeWithPoint (runStrategy strategy initialState startSpace . p)
+    mapMaybeWithPoint (runStrategy strategy initialState startSpace p)
   . NE.toList
   . Random.points
   where
@@ -317,7 +294,7 @@ searchParallelAll :: forall state space failure .
                   -> RandomPoints
                   -> [(Seed, (state, space, failure))]
 searchParallelAll parallelism strategy initialState startSpace p rpoints =
-  mapMaybeParallel (runStrategy strategy initialState startSpace . p) (fromIntegral parallelism) (Random.count rpoints) pstrat (NE.toList (Random.points rpoints))
+  mapMaybeParallel (runStrategy strategy initialState startSpace p) (fromIntegral parallelism) (Random.count rpoints) pstrat (NE.toList (Random.points rpoints))
   where
     -- Evaluation strategy for each element? We only need to figure out whether
     -- it's Just or Nothing, and that's done by mapMaybeParallel.
@@ -345,9 +322,47 @@ searchParallel :: forall state space failure .
 searchParallel parallelism strategy initialState startSpace p =
   headOfList . searchParallelAll parallelism strategy initialState startSpace p
 
+{-# INLINE takeFirst #-}
+takeFirst :: [Maybe t] -> Maybe t
+takeFirst = foldr combine Nothing
+  where
+    combine Nothing  x = x
+    combine (Just x) _ = Just x
+
+-- INLINE phase 2 or later, so that we give the RULES a chance to fire.
+{-# INLINE [2] pickFailing #-}
+-- |
+-- Need to have this simplify/rewrite as follows
+-- 
+--     pickFailing (const Nothing) xs
+--   = Nothing
+--
+pickFailing :: (space -> Maybe failure) -> (state, space) -> Maybe (state, space, failure)
+pickFailing p x = do
+  y <- p (snd x)
+  pure (fst x, snd x, y)
+
+-- INLINE phase 2 or later, so that we give the RULES a chance to fire.
+{-# INLINE [2] pickFirstFailing #-}
+-- The rule pickFailingConstNothing will be applicable to an inlining of this,
+-- in case p = const Nothing. That would leave us with
+--
+--   headOfList . mapMaybe (const Nothing)
+--
+-- which can be re-written to
+--
+--   headOfList . const []
+--
+-- which hopefully can be inlined/rewritten to
+--
+--   const Nothing
+--
+pickFirstFailing :: (space -> Maybe failure) -> [(state, space)] -> Maybe (state, space, failure)
+pickFirstFailing p = headOfList . mapMaybe (pickFailing p)
+
 {-# INLINE makeTriple #-}
-makeTriple :: c -> (a, b) -> (a, b, c)
-makeTriple c (a, b) = (a, b, c)
+makeTriple :: (a, b) -> c -> (a, b, c)
+makeTriple (a, b) c = (a, b, c)
 
 {-# INLINE [2] headOfList #-}
 headOfList :: [a] -> Maybe a
@@ -359,10 +374,6 @@ headOfList (x:_) = Just x
 {-# NOINLINE mapMaybe #-}
 mapMaybe :: (a -> Maybe b) -> [a] -> [b]
 mapMaybe = Data.Maybe.mapMaybe
-
-{-# INLINE withPoint #-}
-withPoint :: (a -> Maybe b) -> (a -> Maybe (a,b))
-withPoint f a = (,) a <$> f a
 
 -- | A rule will rewrite this to 'mapMaybeWithPointMagic', but gives us the
 -- opportunity to apply more specialized rules as well.
