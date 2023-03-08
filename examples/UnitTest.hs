@@ -1,9 +1,11 @@
 module UnitTest where
 
+import Control.Exception (Exception, try)
 import Control.Concurrent.MVar
 import Data.Maybe (mapMaybe)
 import Composite
 import Driver
+import Location (HasCallStack, withFrozenCallStack)
 import Property
 import Space
 import Types
@@ -179,7 +181,7 @@ examplePropertyTest trace = Test
 --
 --   type Assertion = IO ()
 --   assertFailure :: HasCallStack => String -> Assertion
---   assertBool :: HasCallStack => String -> Bool -> Assertion
+--   assertTrue :: HasCallStack => String -> Bool -> Assertion
 --   assertEqual :: (HasCallSatck, Eq a, Show a) => String -> a -> a -> Assertion
 --
 -- where running a test is implemented by choosing whether to throw a particular
@@ -192,13 +194,13 @@ examplePropertyTest trace = Test
 -- | The static part of an HUnit test.
 data HUnitAssertion where
   Failure :: String -> HUnitAssertion
-  Bool :: String -> Bool -> HUnitAssertion
-  Equal :: (Eq a, Pretty a) => String -> a -> a -> HUnitAssertion
+  AssertTrue :: String -> Bool -> HUnitAssertion
+  AssertEqual :: (Eq a, Pretty a) => String -> a -> a -> HUnitAssertion
 
 instance Pretty HUnitAssertion where
   pretty (Failure str) = fromString "Failure" <+> fromString str
-  pretty (Bool str b) = fromString "Bool" <+> fromString str <+> pretty b
-  pretty (Equal str a a') = pretty a <+> fromString "==" <+> pretty a'
+  pretty (AssertTrue str b) = fromString "AssertTrue" <+> fromString str <+> pretty b
+  pretty (AssertEqual str a a') = pretty a <+> fromString "==" <+> pretty a'
 
 -- | The result of an HUnit test.
 data HUnitResult where
@@ -212,19 +214,22 @@ instance Pretty HUnitResult where
 assertFailure :: String -> HUnitAssertion
 assertFailure = Failure
 
-assertBool :: String -> Bool -> HUnitAssertion
-assertBool = Bool
+assertTrue :: String -> Bool -> HUnitAssertion
+assertTrue = AssertTrue
+
+assertEqual :: (Eq a, Pretty a) => String -> a -> a -> HUnitAssertion
+assertEqual = AssertEqual
 
 (===) :: (Eq a, Pretty a) => a -> a -> HUnitAssertion
-(===) = Equal "==="
+(===) = assertEqual ""
 
 -- | HUnit assertions as a property test.
 hunit :: Test () HUnitResult () HUnitAssertion
 hunit = Test
   { subject = Subject $ \assertion _ -> case assertion of
       Failure str -> HUnitAssertionFailed
-      Bool str b -> if b then HUnitAssertionPassed else HUnitAssertionFailed
-      Equal str a a' -> if a == a' then HUnitAssertionPassed else HUnitAssertionFailed
+      AssertTrue str b -> if b then HUnitAssertionPassed else HUnitAssertionFailed
+      AssertEqual str a a' -> if a == a' then HUnitAssertionPassed else HUnitAssertionFailed
   , expectations = that () $ \_ _ result -> case result of
       HUnitAssertionFailed -> False
       HUnitAssertionPassed -> True
@@ -232,9 +237,11 @@ hunit = Test
 
 -- | Declares an HUnit test and gives a canonical way to run it: unit test
 -- domain with 1 sample.
-withHUnit :: ((HUnitAssertion -> Composite check Bool) -> Declaration check) -> Declaration check
+withHUnit :: ((HasCallStack => HUnitAssertion -> Composite check Bool) -> Declaration check) -> Declaration check
 withHUnit k = declare viaPrettyRenderer "HUnit" hunit $ \runHUnit ->
-  k (\assertion -> check (serially 1) runHUnit unitTestDomain assertion)
+  -- Freeze the call stack so that check will use the one from k, which will
+  -- stand in as the `check` function inside the composite.
+  k (\assertion -> withFrozenCallStack (check (serially 1) runHUnit unitTestDomain assertion))
 
 -- One thing to note about these HUnit tests is that the content of the test
 -- itself is always trivial (except maybe in the 'assertEqual' case, which does
@@ -252,6 +259,39 @@ withHUnit k = declare viaPrettyRenderer "HUnit" hunit $ \runHUnit ->
 -- convenient, because the programmer does not have to think too hard about what
 -- they are testing. But on the other hand it does not encourage good software
 -- quality, for that same exact reason.
+
+
+-- hspec-expectations is much the same, since it uses HUnit, but it brings some
+-- notions that we can't directly express as property tests:
+--
+-- - shouldReturn :: Ea a => IO a -> a -> Assertion
+--   shouldReturn action expected = action >>= \actual -> assertEqual actual expected
+--
+-- - shouldNotReturn :: Eq a => IO a -> a -> Assertion
+--   shouldNotReturn action notExpected = action >>= \actual -> assertBool (actual /= notExpected)
+--
+-- - shouldThrow :: Exception e => IO a -> Selector e -> Assertion
+--   shouldThrow io = try io >>= \ex -> <too long to write out>
+--
+-- NB: there is no shouldNotThrow, since that's sort of implicit in every
+-- hspec-expectation / HUnit test, since an exception is a failure.
+--
+-- They do IO, so of course they can't be property tests. Instead, they would
+-- always appear in composites, and they would take an HUnit runner as an
+-- argument.
+
+shouldReturn :: (Eq a, Pretty a) => (HUnitAssertion -> Composite check r) -> IO a -> a -> Composite check r
+shouldReturn hunit io expected = effect io >>= \actual ->
+  hunit (assertEqual "" actual expected)
+
+shouldNotReturn :: (Eq a, Pretty a) => (HUnitAssertion -> Composite check r) -> IO a -> a -> Composite check r
+shouldNotReturn hunit io expected = effect io >>= \actual ->
+  hunit (assertTrue "" (actual /= expected))
+
+shouldThrow :: (Exception e) => (HUnitAssertion -> Composite check r) -> IO a -> (e -> Bool) -> Composite check r
+shouldThrow hunit io p = effect (try io) >>= \r -> case r of
+  Right _ -> hunit (assertFailure "did not get expected excetion")
+  Left e -> hunit (assertTrue "predicate failed on expected exception" (p e))
 
 localConfig :: LocalConfig
 localConfig = defaultLocalConfig
@@ -305,8 +345,10 @@ main = do
       case n == m of
         False -> hunit $ assertFailure "42 is not 43"
         True -> pure True
-      hunit $ assertBool "42 is 43" (42 == 43)
+      hunit $ assertTrue "42 is 43" (42 == 43)
       hunit $ n === m
+      shouldReturn hunit (pure n) 43
+      shouldNotReturn hunit (pure n) 42
       b <- check (serially 99) unitTest unitTestDomain 142
       effect (putStrLn $ "Passed? " ++ show b)
       assert (serially 99) unitTest unitTestDomain 143
