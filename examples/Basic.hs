@@ -11,15 +11,15 @@ import Types
 -- Forced to choose a list element here: Word32.
 example_property :: Property () Natural [Word32] [Word32] String ()
 example_property = Property
-  { domain = Domain
-      { search = Search
-          { strategy = Search.linearSearchStrategy 2 0 99
-          , initialState = ()
-          , minimalSpace = 0
-          }
-      , generate = Random.listOf Random.parameter Random.genWord32
-      }
-  , test = Test
+  { propertyDomain = domain
+      (Search
+        { strategy = Search.linearSearchStrategy 2 0 99
+        , initialState = ()
+        , minimalSpace = 0
+        }
+      )
+      (Random.listOf Random.parameter Random.genWord32)
+  , propertyTest = Test
       { subject = Subject $ \() lst -> reverse lst
       , expectations = example_expectations
       }

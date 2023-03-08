@@ -18,14 +18,7 @@ import qualified Debug.Trace as Debug
 -- and so the only sensible domain is:
 
 unitTestDomain :: Domain () () ()
-unitTestDomain = Domain
-  { search = Search
-      { strategy = unitSearchStrategy
-      , initialState = ()
-      , minimalSpace = ()
-      }
-  , generate = pure ()
-  }
+unitTestDomain = domain trivialSearch (pure ())
 
 -- Running a unit test with a property test driver will sample a bunch of random
 -- seeds, which is wasteful, but it's reasonable to expect GHC to be able to
@@ -116,23 +109,22 @@ shouldMemoize_2 = checkParallel 8 100 (randomPoints 99 (mkSMGen 43)) exampleUnit
 -- float it out).
 
 exampleNonUnitTestDomain :: Domain () Natural Int
-exampleNonUnitTestDomain = Domain
-  { search = Search
+exampleNonUnitTestDomain = domain search generate
+  where
+    search = Search
       { strategy = linearSearchStrategy 3 0 200
       , initialState = ()
       , minimalSpace = 0
       }
-  , generate = fromIntegral <$> parameter
-  }
+    generate = fromIntegral <$> parameter
 
 exampleNonUnitTestDomainWithRandomness ::  Domain () Natural Natural
-exampleNonUnitTestDomainWithRandomness = Domain
-  { search = search exampleNonUnitTestDomain
-  , generate = do
+exampleNonUnitTestDomainWithRandomness = domain (search exampleNonUnitTestDomain) generate
+  where
+    generate = do
       w8 <- genWord8
       n <- parameter
       pure (fromIntegral w8 + fromIntegral n)
-  }
 
 exampleNonUnitTest :: (forall t. String -> t -> t) -> Test Int Int String ()
 exampleNonUnitTest trace = Test
@@ -161,19 +153,19 @@ exampleNonUnitTest trace = Test
 -- is working.
 
 examplePropertyTestDomain :: Domain ((), ()) (Natural, Natural) (Word8, Natural, Natural)
-examplePropertyTestDomain = Domain
-  { search = Search
+examplePropertyTestDomain = domain search generate
+  where
+    search = Search
       { strategy = twoDimensionalSearchStrategy
           (linearSearchStrategy 3 0 16)
           (linearSearchStrategy 4 0 32)
       , initialState = ((), ())
       , minimalSpace = (0, 0)
       }
-  , generate = do
+    generate = do
       (n, m) <- parameter
       w8 <- genWord8
       pure (w8, n, m)
-  }
 
 examplePropertyTest :: (forall t. String -> t -> t)
                     -> Test (Word8, Natural, Natural) Natural String Int

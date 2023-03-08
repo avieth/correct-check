@@ -1,11 +1,19 @@
 module Types
   (
-  -- * Property definitions
-    Subject (..)
+  -- * Test definitions
+    Test (..)
+  , satisfies
+  , Subject (..)
   , Verification (..)
   , Expectation (..)
   , Refutation (..)
   , Expectations
+
+  -- * Domains
+  , Domain (..)
+  , domain
+  , Search (..)
+  , trivialSearch
 
   -- * Generic conjunctions
   , Conjunction (..)
@@ -17,6 +25,7 @@ module Types
   , Counterexample (..)
 
   -- * Re-export
+  , Strategy (..)
   , Natural
   ) where
 
@@ -24,8 +33,64 @@ import Prelude hiding (id, (.))
 import Data.Functor.Contravariant
 import Numeric.Natural (Natural)
 import Location (HasCallStack, MaybeSrcLoc, srcLocOf, callStack)
-import Space.Random (Seed)
+import Space.Random as Random
+import Space.Search as Search
 import Data.List.NonEmpty (NonEmpty)
+
+data Search state space = Search
+  { strategy :: Strategy state space
+  , initialState :: state
+  , minimalSpace :: space
+  }
+
+trivialSearch :: Search () ()
+trivialSearch = Search
+  { strategy = trivialSearchStrategy
+  , initialState = ()
+  , minimalSpace = ()
+  }
+
+-- | A generator and a search space, along with a source location. Intended to
+-- be constructed with the 'domain' function which will give a source location.
+--
+-- The search and generate members cannot be shown, so the source location
+-- serves as the only useful thing that we can display.
+data Domain state space dynamic = Domain
+  { domainSrcLoc :: MaybeSrcLoc
+  , search :: Search state space
+  , generate :: Gen space dynamic
+  }
+
+domain :: HasCallStack => Search state space -> Gen space dynamic -> Domain state space dynamic
+domain s g = Domain
+  { domainSrcLoc = srcLocOf callStack
+  , search = s
+  , generate = g
+  }
+
+-- | A subject and expectations.
+--
+-- This doesn't come with a source location because it's a contravariant
+-- functor. When it comes to displaying information about failed tests, it will
+-- always be clear which test failed because either
+-- - it was run directly, e.g. by a call to 'quickCheck' or
+-- - it was run as part of a composite (see the module 'Composite') in which
+--   case it was declared at a fixed static type, and the source location of
+--   that declaration is known
+data Test dynamic result refutation static = Test
+  -- FIXME should be called assertion not refutation
+  { subject :: Subject dynamic result static
+  , expectations :: Expectations refutation dynamic result static
+  }
+
+instance Contravariant (Test specimen result refutation) where
+  contramap f test = Test
+    { subject = contramap f (subject test)
+    , expectations = contramap f (expectations test)
+    }
+
+satisfies :: Subject dynamic result static -> Expectations refutation dynamic result static -> Test dynamic result refutation static
+satisfies s e = Test { subject = s, expectations = e }
 
 -- | A test subject: given the static and dynamic (from the search space) parts,
 -- come up with a result. Meaningful in relation to 'Verification' and

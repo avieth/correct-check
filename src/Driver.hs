@@ -107,12 +107,12 @@ checkSequentialAll :: t
                    -> [Counterexample space dynamic result refutation]
 checkSequentialAll t seeds prop = fmap toCounterexample results
   where
-    dom = domain prop
+    dom = propertyDomain prop
     results = searchSequentialAll
       (strategy (search dom))
       (initialState (search dom))
       (minimalSpace (search dom))
-      (searchPredicate (generate dom) (test prop) t)
+      (searchPredicate (generate dom) (propertyTest prop) t)
       seeds
 
 {-# INLINE checkSequential #-}
@@ -124,12 +124,12 @@ checkSequential :: t
                 -> Maybe (Counterexample space dynamic result refutation)
 checkSequential t seeds prop = fmap toCounterexample results
   where
-    dom = domain prop
+    dom = propertyDomain prop
     results = searchSequential
       (strategy (search dom))
       (initialState (search dom))
       (minimalSpace (search dom))
-      (searchPredicate (generate dom) (test prop) t)
+      (searchPredicate (generate dom) (propertyTest prop) t)
       seeds
 
 {-# INLINE checkParallel #-}
@@ -142,13 +142,13 @@ checkParallelAll :: Word32
                  -> [Counterexample space dynamic result refutation]
 checkParallelAll n t seeds prop = fmap toCounterexample results
   where
-    dom = domain prop
+    dom = propertyDomain prop
     results = searchParallelAll
       n
       (strategy (search dom))
       (initialState (search dom))
       (minimalSpace (search dom))
-      (searchPredicate (generate dom) (test prop) t)
+      (searchPredicate (generate dom) (propertyTest prop) t)
       seeds
 
 {-# INLINE checkParallelAll #-}
@@ -160,13 +160,13 @@ checkParallel :: Word32
               -> Maybe (Counterexample space dynamic result refutation)
 checkParallel n t seeds prop = fmap toCounterexample results
   where
-    dom = domain prop
+    dom = propertyDomain prop
     results = searchParallel
       n
       (strategy (search dom))
       (initialState (search dom))
       (minimalSpace (search dom))
-      (searchPredicate (generate dom) (test prop) t)
+      (searchPredicate (generate dom) (propertyTest prop) t)
       seeds
 
 -- | Convert a search result into a counterexample.

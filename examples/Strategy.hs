@@ -80,9 +80,9 @@ test_simplification = Test
 -- that is so obvious it need not be tested.
 
 exampleDomain :: Domain () () (DynamicPart () Natural)
-exampleDomain = Domain
-  { search = trivialSearch
-  , generate = do
+exampleDomain = domain trivialSearch generate
+  where
+    generate = do
       (state, space) <- gen
       seed <- genSeed
       pure $ DynamicPart
@@ -90,8 +90,6 @@ exampleDomain = Domain
         , space = space
         , seed = seed
         }
-  }
-  where
     gen :: Arbitrary ((), Natural)
     gen = (,) () <$> genNatural 0 99
 

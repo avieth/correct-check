@@ -115,15 +115,16 @@ addCounterexample :: String -- ^ Name of declaration
                   -> MaybeSrcLoc -- ^ Of check site
                   -> Renderer state space dynamic result refutation static
                   -> TVar CheckState
+                  -> Domain state space dynamic
                   -> static
                   -> Counterexample space dynamic result refutation
                   -> STM ()
-addCounterexample name declSrcLoc checkSrcLoc renderer tvar t !cx = do
+addCounterexample name declSrcLoc checkSrcLoc renderer tvar dom t !cx = do
   st <- readTVar tvar
   writeTVar tvar $! st
     { checkStateFailingTests =
                checkStateFailingTests st
-        Seq.|> FailingCase name declSrcLoc checkSrcLoc renderer t cx
+        Seq.|> FailingCase name declSrcLoc checkSrcLoc renderer dom t cx
     }
 
 -- | Inlcude a test result. No change if it's a pass (Nothing).
@@ -132,11 +133,12 @@ addPropertyTestResult :: String -- ^ Name of declaration
                       -> MaybeSrcLoc -- ^ Of check site
                       -> Renderer state space dynamic result refutation static
                       -> TVar CheckState
+                      -> Domain state space dynamic
                       -> static
                       -> Maybe (Counterexample space dynamic result refutation)
                       -> STM ()
-addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar t =
-  maybe (pure ()) (addCounterexample name declSrcLoc checkSrcLoc renderer tvar t)
+addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar dom static =
+  maybe (pure ()) (addCounterexample name declSrcLoc checkSrcLoc renderer tvar dom static)
 
 -- | Well get this as the result of a composite test run.
 --
@@ -173,7 +175,7 @@ ppExceptionalFooter ex =
     PP.annotate PP.Ansi.bold
   . PP.annotate (PP.Ansi.color PP.Ansi.Red)
   . PP.hsep
-  $ [fromString "Ended with exception", PP.viaShow ex ]
+  $ [fromString "Ended with exception:", PP.viaShow ex ]
 
 ppSummary :: Seed -> CheckState -> Doc AnsiStyle
 ppSummary initialSeed st = PP.annotate PP.Ansi.bold (PP.hsep
@@ -189,22 +191,29 @@ ppSummary initialSeed st = PP.annotate PP.Ansi.bold (PP.hsep
     (verb, noun) = if n == 1 then ("was", "counterexample") else ("were", "counterexamples")
     failingSummary = case NE.nonEmpty (toList (checkStateFailingTests st)) of
       Nothing -> mempty
-      Just neFailingCases -> PP.line <> PP.indent 2 (ppFailingCases neFailingCases)
+      Just neFailingCases -> PP.line <> ppFailingCases neFailingCases
 
 ppFailingCases :: NonEmpty FailingCase -> Doc AnsiStyle
 ppFailingCases = mconcat . intersperse PP.line . fmap ppFailingCase . toList
 
 ppFailingCase :: FailingCase -> Doc AnsiStyle
-ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderer staticPart cexample) = PP.vcat
-  [ PP.annotate PP.Ansi.bold (PP.annotate (PP.Ansi.color PP.Ansi.Red) (fromString name))
+ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderer dom staticPart cexample) = PP.vcat
+  [ PP.annotate PP.Ansi.bold (PP.annotate (PP.Ansi.color PP.Ansi.Red) (fromString "✘" PP.<+> fromString name))
   , PP.indent 2 $ PP.vsep
-    [ fromString "Declared at" PP.<+> PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc declSrcLoc)
+    [ PP.hsep
+        [ fromString "Declared at"
+        , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc declSrcLoc)
+        ]
     , PP.hsep
         [ fromString "Checked at "
         , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc checkSrcLoc)
         ]
-    , PP.indent 12 $ PP.hsep
-        [ fromString "with static part"
+    , PP.hsep
+        [ fromString "Over domain"
+        , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc (domainSrcLoc dom))
+        ]
+    , PP.hsep
+        [ fromString "Applied to "
         , PP.annotate (PP.Ansi.color PP.Ansi.Magenta) (PP.nest 2 (ppMaybe (renderStatic renderer) staticPart))
         ]
     , fromString "Refuted" PP.<+> PP.indent 4 (ppCounterexample renderer cexample)
@@ -340,7 +349,7 @@ assert lconf prop domain x = withFrozenCallStack (do
   b <- check lconf prop domain x
   -- FIXME would be better to give an exception that shows it was an
   -- assertion that caused the early exit?
-  unless b stop)
+  unless b (stopWithExplanation "assertion failed"))
 
 -- | Used to restrict the form of composite tests. The function 'composite'
 -- will eliminate this constructor, but requires that the type parameter
@@ -385,9 +394,9 @@ checkOne :: String -- ^ Name of the declaration
          -> Domain state space dynamic
          -> static
          -> IO Bool
-checkOne name declSrcLoc test renderer env gconf checkSrcLoc tvar lconf domain static = do
+checkOne name declSrcLoc test renderer env gconf checkSrcLoc tvar lconf dom static = do
   seed <- atomically (splitStateSeed tvar)
-  let prop = Property domain test
+  let prop = Property dom test
   -- FIXME if the config asks for 0 random samples, we should quit. Just like
   -- the quickCheck driver.
   let n = max 1 (clampToWord32 (showMaybeSrcLoc declSrcLoc) (nsamples gconf lconf))
@@ -395,7 +404,7 @@ checkOne name declSrcLoc test renderer env gconf checkSrcLoc tvar lconf domain s
       result = case mp of
         Nothing -> checkSequential static (randomPoints (n - 1) seed) prop
         Just m -> checkParallel m static (randomPoints (n - 1) seed) prop
-  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar static result)
+  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar dom static result)
   pure $! isNothing result
 
 -- | Run a composite. Note the ST-style trick: only composites which do not
@@ -416,17 +425,21 @@ composite gconf decl = do
 -- possible to stop the property test eary by throwing an exception. The check
 -- state is in a TVar that can be read after the exception is caught by the
 -- test runner.
-data StopTestEarly = StopTestEarly (MaybeSrcLoc)
+data StopTestEarly = StopTestEarly String MaybeSrcLoc
 
 instance Show StopTestEarly where
-  show (StopTestEarly mloc) = mconcat
-    [ "Stopped early at ", showMaybeSrcLoc mloc ]
+  show (StopTestEarly str mloc) = mconcat
+    [ str, " at ", showMaybeSrcLoc mloc ]
 
 instance Exception StopTestEarly
 
 {-# INLINE stop #-}
-stop :: HasCallStack => Composite property x
-stop = Composite $ \_ -> throwIO (StopTestEarly (srcLocOf callStack))
+stop :: HasCallStack => Composite check x
+stop = Composite $ \_ -> throwIO (StopTestEarly "stop test" (srcLocOf callStack))
+
+{-# INLINE stopWithExplanation #-}
+stopWithExplanation :: HasCallStack => String -> Composite check x
+stopWithExplanation str = Composite $ \_ -> throwIO (StopTestEarly str (srcLocOf callStack))
 
 -- | Counterexample with extra information about where it came from.
 data FailingCase where
@@ -436,6 +449,8 @@ data FailingCase where
               -> MaybeSrcLoc
               -- ^ Of the check
               -> Renderer state space dynamic result refutation static
+              -> Domain state space dynamic
+              -- ^ The domain used in the test
               -> static
               -> Counterexample space dynamic result refutation
               -> FailingCase

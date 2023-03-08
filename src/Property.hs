@@ -1,9 +1,7 @@
+-- TODO this module isn't actually useful, and its name suggests importance.
+-- Remove?
 module Property
   ( Property (..)
-  , Test (..)
-  , Domain (..)
-  , Search (..)
-  , trivialSearch
   ) where
 
 import Data.Functor.Contravariant
@@ -16,42 +14,13 @@ import Types
 -- same idea, just factored differently: the domain determines how to generate
 -- inputs for the separate test part which determines expectations.
 data Property state space dynamic result refutation t = Property
-  { domain :: Domain state space dynamic
-  , test :: Test dynamic result refutation t
+  { propertyDomain :: Domain state space dynamic
+  , propertyTest :: Test dynamic result refutation t
   }
 
 instance Contravariant (Property state space specimen result refutation) where
   contramap f p = p
-    { test = contramap f (test p)
-    }
-
-data Search state space = Search
-  { strategy :: Search.Strategy state space
-  , initialState :: state
-  , minimalSpace :: space
-  }
-
-trivialSearch :: Search () ()
-trivialSearch = Search
-  { strategy = Search.trivialSearchStrategy
-  , initialState = ()
-  , minimalSpace = ()
-  }
-
-data Domain state space dynamic = Domain
-  { search :: Search state space
-  , generate :: Random.Gen space dynamic
-  }
-
-data Test dynamic result refutation t = Test
-  { subject :: Subject dynamic result t
-  , expectations :: Expectations refutation dynamic result t
-  }
-
-instance Contravariant (Test specimen result refutation) where
-  contramap f test = Test
-    { subject = contramap f (subject test)
-    , expectations = contramap f (expectations test)
+    { propertyTest = contramap f (propertyTest p)
     }
 
 -- TODO move to an examples module.
@@ -61,7 +30,7 @@ instance Contravariant (Test specimen result refutation) where
 -- Forced to choose a list element here: Word32.
 example_property :: Property () Natural [Word32] [Word32] String ()
 example_property = Property
-  { domain = Domain
+  { propertyDomain = Domain
       { search = Search
           { strategy = Search.linearSearchStrategy 10 0 99
           , initialState = ()
@@ -69,7 +38,7 @@ example_property = Property
           }
       , generate = Random.listOf Random.parameter Random.genWord32
       }
-  , test = Test
+  , propertyTest = Test
       { subject = Subject $ \() lst -> reverse lst
       , expectations = example_expectations
       }
