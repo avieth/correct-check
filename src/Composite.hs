@@ -201,49 +201,48 @@ ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderer dom staticPart c
   [ PP.annotate PP.Ansi.bold (PP.annotate (PP.Ansi.color PP.Ansi.Red) (fromString "✘" PP.<+> fromString name))
   , PP.indent 2 $ PP.vsep
     [ PP.hsep
-        [ fromString "Declared at"
+        [ boldString "Declared at  "
         , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc declSrcLoc)
         ]
     , PP.hsep
-        [ fromString "Checked at "
+        [ boldString "Checked at   "
         , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc checkSrcLoc)
         ]
     , PP.hsep
-        [ fromString "Over domain"
+        [ boldString "Over domain  "
         , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc (domainSrcLoc dom))
         ]
+    , PP.indent 14 $ PP.vsep
+        [ PP.hang 2 $ PP.hsep
+          [ fromString "with random seed"
+          , PP.annotate (PP.Ansi.color PP.Ansi.Green) (fromString (showSeedHex (randomSeed cexample)))
+          ]
+        , PP.hang 2 $ PP.hsep
+          [ fromString "and search part "
+          , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Yellow) (ppMaybe (renderSpace renderer) (searchPoint cexample))
+          ]
+        ]
     , PP.hsep
-        [ fromString "Applied to "
+        [ boldString "Dynamic input"
+        , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Green) (ppMaybe (renderDynamic renderer) (dynamicPart cexample))
+        ]
+    , PP.hsep
+        [ boldString "Static input "
         , PP.annotate (PP.Ansi.color PP.Ansi.Magenta) (PP.nest 2 (ppMaybe (renderStatic renderer) staticPart))
         ]
-    , fromString "Refuted" PP.<+> PP.indent 4 (ppCounterexample renderer cexample)
-      -- TODO Under here show the space, dynamic part, random seed, and list of
-      -- refutations
+    , PP.hsep
+        [ boldString "Output       "
+        , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Blue) (ppMaybe (renderResult renderer) (resultPart cexample))
+        ]
+    , boldString "Refuting " PP.<+> PP.indent 4 (ppRefutations renderer (refutations cexample))
     ]
   ]
+  where boldString = PP.annotate PP.Ansi.bold . fromString
 
-ppCounterexample :: Renderer state space dynamic result refutation static
-                 -> Counterexample space dynamic result refutation
+ppRefutations :: Renderer state space dynamic result refutation static
+                 -> NonEmpty (Refutation refutation)
                  -> Doc AnsiStyle
-ppCounterexample renderer cexample = PP.vsep
-  [ PP.vsep (fmap (ppRefutation renderer) (toList (refutations cexample)))
-  , PP.hsep
-    [ fromString "with random seed"
-    , PP.annotate (PP.Ansi.color PP.Ansi.Green) (fromString (showSeedHex (randomSeed cexample)))
-    ]
-  , PP.hsep
-    [ fromString "and search part"
-    , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Magenta) (ppMaybe (renderSpace renderer) (searchPoint cexample))
-    ]
-  , PP.hsep
-    [ fromString "generating dynamic part"
-    , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Green) (ppMaybe (renderDynamic renderer) (dynamicPart cexample))
-    ]
-  , PP.hsep
-    [ fromString "yielding result"
-    , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Blue) (ppMaybe (renderResult renderer) (resultPart cexample))
-    ]
-  ]
+ppRefutations renderer refutations = PP.vsep (fmap (ppRefutation renderer) (toList refutations))
 
 ppRefutation :: Renderer state space dynamic result refutation static
              -> Refutation refutation
