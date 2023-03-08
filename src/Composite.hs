@@ -36,10 +36,20 @@ module Composite
   , Renderer (..)
   , noRenderer
   , viaShowRenderer
+  , viaPrettyRenderer
+  , PP.Pretty (..)
+  , fromString
+  , PP.vsep
+  , PP.hsep
+  , PP.indent
+  , PP.nest
+  , PP.hang
+  , (PP.<+>)
 
   , LocalConfig (..)
   , GlobalConfig (..)
   , Parallelism (..)
+  , noParallelism
   , nCapabilities
   , defaultGlobalConfig
   , defaultLocalConfig
@@ -212,15 +222,15 @@ ppCounterexample renderer cexample = PP.vsep
     ]
   , PP.hsep
     [ fromString "and search part"
-    , PP.hang 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Magenta) (ppMaybe (renderSpace renderer) (searchPoint cexample))
+    , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Magenta) (ppMaybe (renderSpace renderer) (searchPoint cexample))
     ]
   , PP.hsep
     [ fromString "generating dynamic part"
-    , PP.hang 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Green) (ppMaybe (renderDynamic renderer) (dynamicPart cexample))
+    , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Green) (ppMaybe (renderDynamic renderer) (dynamicPart cexample))
     ]
   , PP.hsep
     [ fromString "yielding result"
-    , PP.hang 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Blue) (ppMaybe (renderResult renderer) (resultPart cexample))
+    , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Blue) (ppMaybe (renderResult renderer) (resultPart cexample))
     ]
   ]
 
@@ -428,6 +438,17 @@ viaShowRenderer = Renderer
     tshow :: Show t => t -> Doc ann
     tshow = PP.viaShow
 
+viaPrettyRenderer :: (PP.Pretty state, PP.Pretty space, PP.Pretty dynamic, PP.Pretty result, PP.Pretty refutation, PP.Pretty static)
+                  => Renderer state space dynamic result refutation static
+viaPrettyRenderer = Renderer
+  { renderState = Just PP.pretty
+  , renderSpace = Just PP.pretty
+  , renderDynamic = Just PP.pretty
+  , renderResult = Just PP.pretty
+  , renderRefutation = Just PP.pretty
+  , renderStatic = Just PP.pretty
+  }
+
 data Env = Env
   { envCapabilities :: !Word32
   }
@@ -486,6 +507,9 @@ data Parallelism where
   ConstantParallelism :: Natural -> Parallelism
   -- | Given the number of capabilities, decide the amount of parallelism.
   DynamicParallelism :: (Natural -> Natural) -> Parallelism
+
+noParallelism :: Parallelism
+noParallelism = NoParallelism
 
 nCapabilities :: Parallelism
 nCapabilities = DynamicParallelism id

@@ -2,6 +2,7 @@ module Space.Random
   (
   -- * The Gen monad
     Gen (..)
+  , Arbitrary
   , sampleAt
   , sampleAt_
   , ndmap
@@ -37,6 +38,7 @@ module Space.Random
   , SM.newSMGen
 
   -- * Useful for showing seeds on failing tests, and reloading them to rerun
+  , prettySeedHex
   , showSeedHex
   , readSeedHex
 
@@ -48,12 +50,14 @@ module Space.Random
 import Prelude hiding (id, (.))
 import Control.Category
 import Control.Monad (ap, replicateM)
+import Data.String (fromString)
 import Numeric (readHex, showHex)
 import Numeric.Natural (Natural)
 import Data.List (unfoldr)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Data.Word
+import Prettyprinter (Doc)
 import System.Random.SplitMix (SMGen)
 import qualified System.Random.SplitMix as SM
 import Space.Ordered
@@ -90,6 +94,9 @@ instance Monad (Gen space) where
     -- not affect the seed that is given to the term after the bind.
     unGen left smgen1 space $ \_smgen3 t ->
       unGen (k t) smgen2 space l
+
+-- | A generator which doesn't have a parameter.
+type Arbitrary = Gen ()
 
 -- | Use system entropy sources (uses System.Random.SplitMix.initSMGen)
 newSeedIO :: IO Seed
@@ -267,6 +274,9 @@ listOfLength len = listOf (fromParameter len)
 
 listOfKnownLength :: Natural -> Gen space t -> Gen space [t]
 listOfKnownLength len = listOf (fromParameter (constant len))
+
+prettySeedHex :: SMGen -> Doc ann
+prettySeedHex = fromString . showSeedHex
 
 showSeedHex :: SMGen -> String
 showSeedHex smgen = let (w1, w2) = SM.unseedSMGen smgen in (showHex w1 <> showHex w2) ""

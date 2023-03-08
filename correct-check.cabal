@@ -51,4 +51,7 @@ executable examples
     hs-source-dirs:   examples
     default-language: GHC2021
     ghc-options:      -threaded
+                      -O2
+                      -- Increasing this can sometimes bear fruit
+                      -fsimplifier-phases=2
                       -fno-warn-name-shadowing
