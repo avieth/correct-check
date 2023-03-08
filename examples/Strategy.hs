@@ -50,14 +50,21 @@ data Decreases = Decreases
 instance Pretty Decreases where
   pretty _ = fromString "Decreases"
 
+-- | Maybe but with a different Pretty instance that actually shows a Nothing
+-- value.
+newtype Optional t = Optional { getOptional :: Maybe t }
+instance Pretty t => Pretty (Optional t) where
+  pretty (Optional (Just t)) = pretty t
+  pretty (Optional Nothing) = fromString "< nothing >"
+
 -- | A family of tests for any partial order and strategy of agreeing types (the
 -- static part).
-test_complication :: Test (DynamicPart state space) (Maybe space) Increases (StaticPart state space)
+test_complication :: Test (DynamicPart state space) (Optional space) Increases (StaticPart state space)
 test_complication = Test
-  { subject = Subject $ \spart dpart ->
+  { subject = Subject $ \spart dpart -> Optional $
       fmap snd (complicate (searchStrategy spart) (seed dpart) (state dpart) (space dpart))
   , expectations =
-      that Increases $ \spart dpart result -> False &&
+      that Increases $ \spart dpart (Optional result) -> False &&
         -- The test passes vacuously if the result is Nothing (there was no
         -- more complex thing chosen).
         --
