@@ -14,6 +14,7 @@ module Space.Search
   , trivialSearchStrategy
   , unitSearchStrategy
   , linearSearchStrategy
+  , powerSearchStrategy
   , twoDimensionalSearchStrategy
   ) where
 
@@ -57,26 +58,32 @@ unitSearchStrategy :: Strategy state ()
 unitSearchStrategy = trivialSearchStrategy
 
 -- | Similar to hedgehog: increases a single "size" parameter to an upper
--- bound. This one is linear: you give a coefficient and a minimal value.
---
---   y = c*x + b
---
--- where the first parameter is c, second is b. Third is the upper bound. This
--- will never complicate to above the upper bound, and never simplify to below
--- the lower bound.
---
+-- bound. This one is linear: it will always increase by a constant factor.
+---
 -- Note one key difference from hedgehog: a generator do not need to state an
 -- upper bound, but the search strategy does.
 --
 -- NB: using a coefficient of 1 may not be desirable, because it means shrinking
 -- is useless: the minimal failing case will always be found on the way up.
 linearSearchStrategy :: Natural -> Natural -> Natural -> Strategy state Natural
-linearSearchStrategy c b upperBound = Strategy
-  { complicate = \_ st n -> if n >= upperBound then Nothing else Just (st, c * (n + 1))
-  , simplify = \_ st n -> if n <= b then [] else [(st, n-1)]
+linearSearchStrategy c lowerBound upperBound = Strategy
+  { complicate = \_ st n -> if n >= upperBound then Nothing else Just (st, (n + 1) * c)
+  , simplify = \_ st n -> if n <= lowerBound then [] else [(st, n-1)]
   }
 
+-- | Instead of multiplying by c, as in 'linearSearchStrategy', this one will
+-- take the c'th power of the current point.
+powerSearchStrategy :: Natural -> Natural -> Natural -> Strategy state Natural
+powerSearchStrategy c lowerBound upperBound = Strategy
+  { complicate = \_ st n -> if n >= upperBound then Nothing else Just (st, (n + 1) ^ c)
+  , simplify = \_ st n -> if n <= lowerBound then [] else [(st, n-1)]
+  }
+
+-- TODO
+-- wouldn't it be better to use the state parameter, in linear and exponential,
+-- to track how many times it has been increased? 
 -- Still not actually clear whether having the state parameter is useful at all.
+
 twoDimensionalSearchStrategy :: forall s1 s2 a b .
                                 Strategy s1 a
                              -> Strategy s2 b
