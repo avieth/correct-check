@@ -5,6 +5,8 @@ module Space.Ordered
   , constant
 
   , PartialOrder
+  , isLessThan
+  , isGreaterThan
   , unitPartialOrder
   , ordPartialOrder
 
@@ -14,8 +16,6 @@ module Space.Ordered
 
 import Prelude hiding (id, (.))
 import Control.Category
-import Control.Monad (ap, replicateM)
-import Numeric.Natural
 
 -- | Intended as a signpost to help make it easier to ensure only non-decreasing
 -- functions are used to contramap the space parameter of a Gen.
@@ -34,6 +34,20 @@ constant :: t -> NonDecreasing s t
 constant = NonDecreasing . const
 
 type PartialOrder t = t -> t -> Maybe Ordering
+
+-- | True if the first argument is less than the first, for consistency
+-- with 'compare'
+isLessThan :: PartialOrder t -> t -> t -> Bool
+isLessThan pord l r = case pord l r of
+  Just LT -> True
+  _ -> False
+
+-- | True if the first argument is greater than the first, for consistency
+-- with 'compare'
+isGreaterThan :: PartialOrder t -> t -> t -> Bool
+isGreaterThan pord l r = case pord l r of
+  Just GT -> True
+  _ -> False
 
 -- | The only sensible partial order of ().
 unitPartialOrder :: PartialOrder ()
@@ -56,6 +70,3 @@ productPartialOrder fstPord sndPord = \(leftA :*: leftB) (rightA :*: rightB) -> 
     (LT, LT) -> Just LT
     (GT, GT) -> Just GT
     (_ , _ ) -> Nothing
-
--- What we actually want is a more rigidly-structured product which can also
--- have human-readable names for components.

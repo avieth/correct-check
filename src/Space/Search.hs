@@ -11,7 +11,7 @@ module Space.Search
   , searchParallelAll
 
   -- * Various search strategies
-  , trviailSearchStrategy
+  , trivialSearchStrategy
   , unitSearchStrategy
   , linearSearchStrategy
   , twoDimensionalSearchStrategy
@@ -46,15 +46,15 @@ data Strategy state space = Strategy
   }
 
 -- | Never grows, never shrinks.
-trviailSearchStrategy :: Strategy state space
-trviailSearchStrategy = Strategy
+trivialSearchStrategy :: Strategy state space
+trivialSearchStrategy = Strategy
   { complicate = \_ _ _ -> Nothing
   , simplify = \_ _ _ -> []
   }
 
 -- | The only sensible way to search the single-element space.
 unitSearchStrategy :: Strategy state ()
-unitSearchStrategy = trviailSearchStrategy
+unitSearchStrategy = trivialSearchStrategy
 
 -- | Similar to hedgehog: increases a single "size" parameter to an upper
 -- bound. This one is linear: you give a coefficient and a minimal value.

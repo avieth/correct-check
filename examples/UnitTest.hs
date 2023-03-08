@@ -1,3 +1,5 @@
+module UnitTest where
+
 import Control.Concurrent.MVar
 import Data.Maybe (mapMaybe)
 import Composite

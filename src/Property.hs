@@ -3,11 +3,11 @@ module Property
   , Test (..)
   , Domain (..)
   , Search (..)
+  , trivialSearch
   ) where
 
 import Data.Functor.Contravariant
 import Data.Word (Word32)
-import Numeric.Natural (Natural)
 import qualified Space.Random as Random
 import qualified Space.Search as Search
 import Types
@@ -29,6 +29,13 @@ data Search state space = Search
   { strategy :: Search.Strategy state space
   , initialState :: state
   , minimalSpace :: space
+  }
+
+trivialSearch :: Search () ()
+trivialSearch = Search
+  { strategy = Search.trivialSearchStrategy
+  , initialState = ()
+  , minimalSpace = ()
   }
 
 data Domain state space dynamic = Domain

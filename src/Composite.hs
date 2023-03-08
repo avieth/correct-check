@@ -40,6 +40,7 @@ module Composite
   , LocalConfig (..)
   , GlobalConfig (..)
   , Parallelism (..)
+  , nCapabilities
   , defaultGlobalConfig
   , defaultLocalConfig
   ) where
@@ -61,7 +62,7 @@ import Data.Maybe (isNothing)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.String (fromString)
-import GHC.RTS.Flags (nCapabilities, getParFlags)
+import qualified GHC.RTS.Flags as RTS (nCapabilities, getParFlags)
 import Prettyprinter (Doc)
 import qualified Prettyprinter as PP
 import Prettyprinter.Render.Terminal (AnsiStyle)
@@ -144,10 +145,12 @@ ppTestResult tresult = case tresult of
   Normal seed state -> PP.vsep
     [ ppSummary seed state
     , ppNormalFooter
+    , PP.line
     ]
   Exceptional seed state ex -> PP.vsep
     [ ppSummary seed state
     , ppExceptionalFooter ex
+    , PP.line
     ]
 
 ppNormalFooter :: Doc AnsiStyle
@@ -431,9 +434,9 @@ data Env = Env
 
 mkEnv :: IO Env
 mkEnv =  do
-  parFlags <- getParFlags
+  parFlags <- RTS.getParFlags
   pure $ Env
-    { envCapabilities = nCapabilities parFlags
+    { envCapabilities = RTS.nCapabilities parFlags
     }
 
 -- | Configuration of a composite run overall.
@@ -483,3 +486,6 @@ data Parallelism where
   ConstantParallelism :: Natural -> Parallelism
   -- | Given the number of capabilities, decide the amount of parallelism.
   DynamicParallelism :: (Natural -> Natural) -> Parallelism
+
+nCapabilities :: Parallelism
+nCapabilities = DynamicParallelism id

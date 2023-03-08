@@ -38,13 +38,17 @@ library
                       prettyprinter-ansi-terminal
     hs-source-dirs:   src
     default-language: GHC2021
-    ghc-options:      -fno-warn-name-shadowing
+    ghc-options:      -threaded
+                      -fno-warn-name-shadowing
 
-library examples
-    exposed-modules:  Basic
+executable examples
+    main-is:          Main.hs
+    other-modules:    Basic
+                      Strategy
                       UnitTest
     build-depends:    base,
                       correct-check
     hs-source-dirs:   examples
     default-language: GHC2021
-    ghc-options:      -fno-warn-name-shadowing
+    ghc-options:      -threaded
+                      -fno-warn-name-shadowing

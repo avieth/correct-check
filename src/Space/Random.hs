@@ -15,6 +15,7 @@ module Space.Random
   , genWord64
   , genWord64Bounded
   , genInteger
+  , genNatural
   , listOf
   , listOfLength
   , listOfKnownLength
@@ -201,6 +202,9 @@ genWord64 = Gen $ \smgen _ k -> let (w64, smgen') = SM.nextWord64 smgen in k smg
 -- | Within these bounds, inclusive. See 'System.Random.SplitMix.nextInteger'.
 genInteger :: Integer -> Integer -> Gen space Integer
 genInteger a b = Gen $ \smgen _ k -> let (n, smgen') = SM.nextInteger a b smgen in k smgen' n
+
+genNatural :: Natural -> Natural -> Gen space Natural
+genNatural a b = fromIntegral <$> genInteger (fromIntegral a) (fromIntegral b)
 
 -- | The lower number will be the lower bound, higher will be the upper bound,
 -- inclusive.
