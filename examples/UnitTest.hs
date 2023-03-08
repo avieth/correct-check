@@ -237,6 +237,7 @@ hunit = Test
 
 -- | Declares an HUnit test and gives a canonical way to run it: unit test
 -- domain with 1 sample.
+{-# INLINE withHUnit #-}
 withHUnit :: ((HasCallStack => HUnitAssertion -> Composite check Bool) -> Declaration check) -> Declaration check
 withHUnit k = declare viaPrettyRenderer "HUnit" hunit $ \runHUnit ->
   -- Freeze the call stack so that check will use the one from k, which will
