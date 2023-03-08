@@ -174,6 +174,86 @@ examplePropertyTest trace = Test
   , expectations = (that "The threshold is greater" $ \t n s -> s < fromIntegral t)
   }
 
+-- We can express what HUnit does, but without any IO.
+-- In HUnit there are things like
+--
+--   type Assertion = IO ()
+--   assertFailure :: HasCallStack => String -> Assertion
+--   assertBool :: HasCallStack => String -> Bool -> Assertion
+--   assertEqual :: (HasCallSatck, Eq a, Show a) => String -> a -> a -> Assertion
+--
+-- where running a test is implemented by choosing whether to throw a particular
+-- exception.
+--
+-- The same idea can be expressed in correct-check, without any IO, and then
+-- embedded into IO by way of a composite test, just like any other property
+-- test.
+
+-- | The static part of an HUnit test.
+data HUnitAssertion where
+  Failure :: String -> HUnitAssertion
+  Bool :: String -> Bool -> HUnitAssertion
+  Equal :: (Eq a, Pretty a) => String -> a -> a -> HUnitAssertion
+
+instance Pretty HUnitAssertion where
+  pretty (Failure str) = fromString "Failure" <+> fromString str
+  pretty (Bool str b) = fromString "Bool" <+> fromString str <+> pretty b
+  pretty (Equal str a a') = pretty a <+> fromString "==" <+> pretty a'
+
+-- | The result of an HUnit test.
+data HUnitResult where
+  HUnitAssertionFailed :: HUnitResult
+  HUnitAssertionPassed :: HUnitResult
+
+instance Pretty HUnitResult where
+  pretty HUnitAssertionFailed = fromString "HUnit assertion failed"
+  pretty HUnitAssertionPassed = fromString "HUnit assertion passed"
+
+assertFailure :: String -> HUnitAssertion
+assertFailure = Failure
+
+assertBool :: String -> Bool -> HUnitAssertion
+assertBool = Bool
+
+(===) :: (Eq a, Pretty a) => a -> a -> HUnitAssertion
+(===) = Equal "==="
+
+-- | HUnit assertions as a property test.
+hunit :: Test () HUnitResult () HUnitAssertion
+hunit = Test
+  { subject = Subject $ \assertion _ -> case assertion of
+      Failure str -> HUnitAssertionFailed
+      Bool str b -> if b then HUnitAssertionPassed else HUnitAssertionFailed
+      Equal str a a' -> if a == a' then HUnitAssertionPassed else HUnitAssertionFailed
+  , expectations = that () $ \_ _ result -> case result of
+      HUnitAssertionFailed -> False
+      HUnitAssertionPassed -> True
+  }
+
+-- | Declares an HUnit test and gives a canonical way to run it: unit test
+-- domain with 1 sample.
+withHUnit :: ((HUnitAssertion -> Composite check Bool) -> Declaration check) -> Declaration check
+withHUnit k = declare viaPrettyRenderer "HUnit" hunit $ \runHUnit ->
+  k (\assertion -> check (serially 1) runHUnit unitTestDomain assertion)
+
+-- One thing to note about these HUnit tests is that the content of the test
+-- itself is always trivial (except maybe in the 'assertEqual' case, which does
+-- an _almost_ trivial amount of the work).
+--
+-- And so when an HUnit assertion fails as part of a composite test, the
+-- information about the failure is quite limited: it shows what kind of
+-- assertion failed, possibly some string chosen by the assertion call site, and
+-- in the case of an equality failure, the values that are not equal.
+-- The test is reproducible, but in a degenerate sort of way: you just have to
+-- give the same Bool. The _real content_ of the test was already computed,
+-- prior to and outside of the HUnit test itself.
+--
+-- This is just a fact about HUnit style testing in general. It's arguably more
+-- convenient, because the programmer does not have to think too hard about what
+-- they are testing. But on the other hand it does not encourage good software
+-- quality, for that same exact reason.
+
+localConfig :: LocalConfig
 localConfig = defaultLocalConfig
 
 main :: IO ()
@@ -218,7 +298,15 @@ main = do
     declare viaShowRenderer "UNIT TEST" exampleUnitTest $ \unitTest ->
     declare viaShowRenderer "NON UNIT TEST" (exampleNonUnitTest (const id)) $ \nonUnitTest ->
     declare viaShowRenderer "PROPERTY TEST" (examplePropertyTest (const id)) $ \propertyTest ->
+    withHUnit $ \hunit ->
     compose $ do
+      let n = 42 :: Natural
+          m = 43 :: Natural
+      case n == m of
+        False -> hunit $ assertFailure "42 is not 43"
+        True -> pure True
+      hunit $ assertBool "42 is 43" (42 == 43)
+      hunit $ n === m
       b <- check (serially 99) unitTest unitTestDomain 142
       effect (putStrLn $ "Passed? " ++ show b)
       assert (serially 99) unitTest unitTestDomain 143
