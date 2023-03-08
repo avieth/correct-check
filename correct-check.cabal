@@ -35,7 +35,8 @@ library
                       stm,
                       text,
                       prettyprinter,
-                      prettyprinter-ansi-terminal
+                      prettyprinter-ansi-terminal,
+                      unliftio-core,
     hs-source-dirs:   src
     default-language: GHC2021
     ghc-options:      -threaded
@@ -47,7 +48,8 @@ executable examples
                       Strategy
                       UnitTest
     build-depends:    base,
-                      correct-check
+                      correct-check,
+                      async
     hs-source-dirs:   examples
     default-language: GHC2021
     ghc-options:      -threaded

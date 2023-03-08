@@ -1,6 +1,7 @@
 module UnitTest where
 
-import Control.Exception (Exception, try)
+import Control.Exception (Exception, bracket, try)
+import Control.Concurrent.Async as Async
 import Control.Concurrent.MVar
 import Data.Maybe (mapMaybe)
 import Composite
@@ -282,15 +283,15 @@ withHUnit k = declare viaPrettyRenderer "HUnit" hunit $ \runHUnit ->
 -- argument.
 
 shouldReturn :: (Eq a, Pretty a) => (HUnitAssertion -> Composite check r) -> IO a -> a -> Composite check r
-shouldReturn hunit io expected = effect io >>= \actual ->
+shouldReturn hunit io expected = effect_ io >>= \actual ->
   hunit (assertEqual "" actual expected)
 
 shouldNotReturn :: (Eq a, Pretty a) => (HUnitAssertion -> Composite check r) -> IO a -> a -> Composite check r
-shouldNotReturn hunit io expected = effect io >>= \actual ->
+shouldNotReturn hunit io expected = effect_ io >>= \actual ->
   hunit (assertTrue "" (actual /= expected))
 
 shouldThrow :: (Exception e) => (HUnitAssertion -> Composite check r) -> IO a -> (e -> Bool) -> Composite check r
-shouldThrow hunit io p = effect (try io) >>= \r -> case r of
+shouldThrow hunit io p = effect_ (try io) >>= \r -> case r of
   Right _ -> hunit (assertFailure "did not get expected excetion")
   Left e -> hunit (assertTrue "predicate failed on expected exception" (p e))
 
@@ -341,6 +342,14 @@ main = do
     declare viaShowRenderer "PROPERTY TEST" (examplePropertyTest (const id)) $ \propertyTest ->
     withHUnit $ \hunit ->
     compose $ do
+
+      assert (serially 99) unitTest unitTestDomain 143
+      b <- check (serially 99) unitTest unitTestDomain 142
+      effect_ (putStrLn $ "Passed? " ++ show b)
+      check (serially 99) nonUnitTest exampleNonUnitTestDomain ()
+      check (serially 99) propertyTest examplePropertyTestDomain (read str1)
+
+      -- HUnit examples.
       let n = 42 :: Natural
           m = 43 :: Natural
       case n == m of
@@ -350,50 +359,34 @@ main = do
       hunit $ n === m
       shouldReturn hunit (pure n) 43
       shouldNotReturn hunit (pure n) 42
-      b <- check (serially 99) unitTest unitTestDomain 142
-      effect (putStrLn $ "Passed? " ++ show b)
-      assert (serially 99) unitTest unitTestDomain 143
-      check (serially 99) nonUnitTest exampleNonUnitTestDomain ()
-      check (serially 99) propertyTest examplePropertyTestDomain (read str1)
-      -- For some reason, having a `() <-` can cause rewrite rules to not fire,
-      -- and the non-random test not to simplify enough.
-      --
-      -- It only happens if we write () literally. _ is fine, c is fine.
-      -- It's the thing on the RHS that doesn't get simplified.
-      --
-      -- This surely has something to do with some builtin GHC rule firing and
-      -- maybe causing GHC to not have any budget left to try our rules?
-      --
-      -- If we use 3 simplifier phases, it works.
-      assert (inParallel 256)
-        unitTest
-        unitTestDomain
-        1042
-      check (serially 256)
-        unitTest
-        unitTestDomain
-        142
-      bracket (takeMVar mvar) (putMVar mvar) $ \_ -> do
+
+      -- Arbitrary IO is possible, in the MonadUnliftIO style.
+      -- In fact, there is a MonadUnliftIO instance for Composite, so the
+      -- various "lifted" library will work directly.
+      effect $ \runInIO -> bracket (takeMVar mvar) (putMVar mvar) $ \_ -> runInIO $ do
         assert (serially 32)
           unitTest
           unitTestDomain
           142
-      effect (putStrLn $ "Passed? " ++ show b)
-      check (inParallel 128)
-        propertyTest
-        examplePropertyTestDomain
-        1280
+
+      let testInThread = check (inParallel 256) propertyTest examplePropertyTestDomain 1280
+      effect $ \runInIO -> withAsync (runInIO testInThread) $ \thread -> runInIO $ do
+        check (inParallel 256) propertyTest examplePropertyTestDomain 256
+        effect_ (Async.wait thread)
+
       -- Why do we bother with composite/declare?
       -- After all, we can still run properties directly, and even via quickCheck
       -- because we can do IO for a new random seed.
-      effect (quickCheck (2 ^ 32 - 1) 200 (Property unitTestDomain exampleUnitTest) >>= print)
+      effect_ $ do
+        result <- quickCheck (2 ^ 32 - 1) 200 (Property unitTestDomain exampleUnitTest)
+        print result
       -- The point of composite/declare is to put a barrier between the properties
       -- that may be tested, and everything else. It ensures that the arbitrary IO
-      -- in the composite cannot interact with the TVar CheckState.
-      assert (inParallel 128)
-        nonUnitTest
-        exampleNonUnitTestDomain
-        ()
+      -- in the composite cannot interact with the TVar CheckState. The
+      -- quickCheck in the effect above will run and print the result; it will
+      -- even be simplified to only carry out the unit test at most once. But
+      -- if it fails, it won't show up in the test results.
+
       pure ()
   -- The bracket within the composite ensures this will not block, even if
   -- unitTest failed at 142 and the assertion caused the composite to end

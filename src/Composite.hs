@@ -23,7 +23,7 @@ module Composite
 
   , Composite
   , effect
-  , bracket
+  , effect_
   , check
   , assert
   , stop
@@ -59,8 +59,9 @@ module Composite
 
 import Control.Concurrent.STM hiding (check)
 import Control.Exception (SomeException, Exception, evaluate, throwIO, try)
-import qualified Control.Exception as Exception
 import Control.Monad (ap, unless)
+import qualified Control.Monad.IO.Class as Lift
+import qualified Control.Monad.IO.Unlift as Unlift
 import Location
 import Property
 import Types
@@ -298,14 +299,24 @@ instance Monad (Composite property) where
   return = pure
   Composite left >>= k = Composite (\l -> left l >>= runCompositeAt l . k)
 
-effect :: IO t -> Composite property t
-effect io = Composite $ \_ -> io
+-- MonadIO and MonadUnliftIO are given, to make it easier to write composites:
+-- there's already a wide variety of "lifted" variants of things out there.
 
-bracket :: IO r -> (r -> IO ()) -> (r -> Composite property t) -> Composite property t
-bracket acquire release k = Composite $ \l -> Exception.bracket acquire release (runCompositeAt l . k)
+instance Lift.MonadIO (Composite property) where
+  {-# INLINE liftIO #-}
+  liftIO io = Composite $ \_ -> io
 
--- TODO would probably want to give MonadIO and UnliftIO instances, for maximum
--- compatibility.
+instance Unlift.MonadUnliftIO (Composite property) where
+  {-# INLINE withRunInIO #-}
+  withRunInIO k = Composite $ \l -> k (runCompositeAt l)
+
+{-# INLINE effect #-}
+effect :: ((forall r . Composite property r -> IO r) -> IO t) -> Composite property t
+effect = Unlift.withRunInIO
+
+{-# INLINE effect_ #-}
+effect_ :: IO t -> Composite property t
+effect_ = Lift.liftIO
 
 -- | Flipped 'runComposite'.
 {-# INLINE runCompositeAt #-}
