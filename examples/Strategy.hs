@@ -79,8 +79,8 @@ test_simplification = Test
 -- Since we're testing search strategies, it only makes sense to use the strategy
 -- that is so obvious it need not be tested.
 
-exampleDomain :: Domain () () (DynamicPart () Natural)
-exampleDomain = domain trivialSearch generate
+bigDomain :: Domain () () (DynamicPart () Natural)
+bigDomain = domain trivialSearch generate
   where
     generate = do
       (state, space) <- gen
@@ -91,7 +91,7 @@ exampleDomain = domain trivialSearch generate
         , seed = seed
         }
     gen :: Arbitrary ((), Natural)
-    gen = (,) () <$> genNatural 0 99
+    gen = (,) () <$> genNatural 0 (2^32)
 
 localConfig :: LocalConfig
 localConfig = defaultLocalConfig
@@ -101,27 +101,17 @@ localConfig = defaultLocalConfig
 
 main :: IO ()
 main = do
-  -- Q: does it make sense to give the domain in the declaration??
-  -- Maybe not! Should be able to apply any domain within the check.
-  -- True enough. You should have to give
-  -- - The LocalConfig
-  -- - The `Renderer state space spcimen result refutation static`
-  -- - A name
-  -- - The `Test dynamic result refutation static`
-  --
   result <- composite defaultGlobalConfig $
     declare viaPrettyRenderer "Linear search complication"   test_complication   $ \complication ->
     declare viaPrettyRenderer "Linear search simplification" test_simplification $ \simplification ->
     compose $ do
-      -- FIXME seems more appropriate to take the strategy as the static part,
-      -- under some fixed order.
       check (serially 99)
         complication
-        exampleDomain
+        bigDomain
         (StaticPart "Linear(1,0,99)" (linearSearchStrategy 1 0 99) ordPartialOrder)
       check (serially 99)
         simplification
-        exampleDomain
+        bigDomain
         (StaticPart "Linear(1,0,99)" (linearSearchStrategy 1 0 99) ordPartialOrder)
       pure ()
   printTestResult result
