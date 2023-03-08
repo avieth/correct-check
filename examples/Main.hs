@@ -3,4 +3,4 @@ import qualified Strategy
 import qualified UnitTest
 
 main :: IO ()
-main = Strategy.main
+main = UnitTest.main

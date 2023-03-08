@@ -52,6 +52,6 @@ executable examples
     default-language: GHC2021
     ghc-options:      -threaded
                       -O2
-                      -- Increasing this can sometimes bear fruit
+                      -- Increasing this can sometimes bear fruit, but 2 is usually enough.
                       -fsimplifier-phases=2
                       -fno-warn-name-shadowing

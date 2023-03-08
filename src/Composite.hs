@@ -47,6 +47,8 @@ module Composite
   , (PP.<+>)
 
   , LocalConfig (..)
+  , serially
+  , inParallel
   , GlobalConfig (..)
   , Parallelism (..)
   , noParallelism
@@ -256,11 +258,26 @@ ppMaybe mPp t = case mPp of
   Nothing -> fromString "< cannot print  >"
   Just k -> k t
 
--- | A composite is able to call some function that will check a property at a
--- given point. The check gives a bool saying whether it passed, which allows
--- for a composite to choose to exit early.
-newtype Composite property t = Composite
-  { runComposite :: (forall x . MaybeSrcLoc -> property x -> x -> IO Bool) -> IO t }
+-- | A composite is able to call some function that will run a test over a
+-- given domain and static point.
+--
+-- The check gives a bool saying whether it passed, which allows for a
+-- composite to choose to exit early.
+--
+-- The parameter `check` will be instantiated at `Check`, but will appear
+-- universally quantified during construction.
+newtype Composite check t = Composite
+  { runComposite ::
+         (forall state space dynamic static .
+              MaybeSrcLoc -- Of the call site to this check in the composite
+           -> LocalConfig
+           -> check state space dynamic static 
+           -> Domain state space dynamic -- The domain to use
+           -> static -- The static part
+           -> IO Bool
+         )
+      -> IO t
+  }
 
 instance Functor (Composite property) where
   fmap f (Composite k) = Composite (\l -> fmap f (k l))
@@ -284,7 +301,17 @@ bracket acquire release k = Composite $ \l -> Exception.bracket acquire release 
 
 -- | Flipped 'runComposite'.
 {-# INLINE runCompositeAt #-}
-runCompositeAt :: (forall x . MaybeSrcLoc -> property x -> x -> IO Bool) -> Composite property t -> IO t
+runCompositeAt ::
+     (forall state space dynamic static .
+          MaybeSrcLoc
+       -> LocalConfig
+       -> check state space dynamic static
+       -> Domain state space dynamic
+       -> static
+       -> IO Bool
+     )
+  -> Composite check t
+  -> IO t
 runCompositeAt k comp = runComposite comp k
 
 -- | The `property` parameter of 'Composite' will be instantiated to this in
@@ -294,80 +321,87 @@ runCompositeAt k comp = runComposite comp k
 -- from the driver and not from the local property declaration.
 -- The MaybeSrcLoc is the place where the check was called in the composite (not
 -- where it was declared).
-newtype Check t = Check (Env -> GlobalConfig -> MaybeSrcLoc -> TVar CheckState -> t -> IO Bool)
+newtype Check state space dynamic static = Check (Env -> GlobalConfig -> MaybeSrcLoc -> TVar CheckState -> LocalConfig -> Domain state space dynamic -> static -> IO Bool)
 
 {-# INLINE runCompositeCheck #-}
 runCompositeCheck :: Env -> GlobalConfig -> TVar CheckState -> Composite Check t -> IO t
-runCompositeCheck env gconf tvar (Composite k) = k (\srcLoc (Check f) -> f env gconf srcLoc tvar)
+runCompositeCheck env gconf tvar (Composite k) = k (\srcLoc lconf (Check f) -> f env gconf srcLoc tvar lconf)
 
 -- | This will check a property within a composite. It will force the evaluation
 -- of the property up to the determination of whether it passes or not.
-check :: HasCallStack => property x -> x -> Composite property Bool
-check prop x = Composite $ \k -> k (srcLocOf callStack) prop x >>= evaluate
+{-# INLINE check #-}
+check :: HasCallStack => LocalConfig -> check state space dynamic static -> Domain state space dynamic -> static -> Composite check Bool
+check lconf prop domain x = Composite $ \k -> k (srcLocOf callStack) lconf prop domain x >>= evaluate
 
 -- | 'check' but stops the test if it's a failure.
-assert :: HasCallStack => property x -> x -> Composite property ()
-assert prop x = do
-  b <- withFrozenCallStack (check prop x)
+{-# INLINE assert #-}
+assert :: HasCallStack => LocalConfig -> check state space dynamic static -> Domain state space dynamic -> static -> Composite check ()
+assert lconf prop domain x = withFrozenCallStack (do
+  b <- check lconf prop domain x
   -- FIXME would be better to give an exception that shows it was an
   -- assertion that caused the early exit?
-  unless b stop
+  unless b stop)
 
 -- | Used to restrict the form of composite tests. The function 'composite'
 -- will eliminate this constructor, but requires that the type parameter
--- `property` be universally quanitified (similar to the ST trick).
-newtype Declaration property = Declaration
-  { runDeclaration :: (forall r . Check r -> property r) -> Composite property () }
+-- `check` be universally quanitified (similar to the ST trick).
+newtype Declaration check = Declaration
+  { runDeclaration ::
+         (forall state space dynamic static .
+           Check state space dynamic static -> check state space dynamic static
+         )
+      -> Composite check () }
 
 -- INLINEs on compose, declare, and composite are very important. Without it,
 -- GHC won't be able to simplify unit tests in composites.
 
 {-# INLINE CONLIKE compose #-}
-compose :: Composite property () -> Declaration property
+compose :: Composite check () -> Declaration check
 compose comp = Declaration (\_ -> comp)
 
 -- | Declare a property, to allow for its use in a composite.
 {-# INLINE CONLIKE declare #-}
 declare :: HasCallStack
-        => String
-        -> Property state space dynamic result refutation t
-        -> Renderer state space dynamic result refutation t
-        -> LocalConfig
-        -> (property t -> Declaration property)
-        -> Declaration property
-declare name prop renderer lconf k = Declaration $ \toProperty ->
-  runDeclaration (k (toProperty (Check (checkOne name (srcLocOf callStack) prop renderer lconf)))) toProperty
+        => Renderer state space dynamic result refutation static
+        -> String
+        -> Test dynamic result refutation static
+        -> (check state space dynamic static -> Declaration check)
+        -> Declaration check
+declare renderer name test k = Declaration $ \toCheck ->
+  runDeclaration (k (toCheck (Check (checkOne name (srcLocOf callStack) test renderer)))) toCheck
 
 -- | Takes the source location of the declaration, and also of the call to
 -- check/assert.
 {-# INLINE checkOne #-}
 checkOne :: String -- ^ Name of the declaration
          -> MaybeSrcLoc -- ^ Location of the declaration
-         -> Property state space dynamic result refutation t
-         -> Renderer state space dynamic result refutation t
-         -> LocalConfig
+         -> Test dynamic result refutation static
+         -> Renderer state space dynamic result refutation static
          -> Env
          -> GlobalConfig
          -> MaybeSrcLoc -- ^ Location of the call to check within the Composite
          -> TVar CheckState
-         -> t
+         -> LocalConfig
+         -> Domain state space dynamic
+         -> static
          -> IO Bool
-checkOne name declSrcLoc prop renderer lconf env gconf checkSrcLoc tvar t = do
+checkOne name declSrcLoc test renderer env gconf checkSrcLoc tvar lconf domain static = do
   seed <- atomically (splitStateSeed tvar)
+  let prop = Property domain test
   -- FIXME if the config asks for 0 random samples, we should quit. Just like
   -- the quickCheck driver.
   let n = max 1 (clampToWord32 (showMaybeSrcLoc declSrcLoc) (nsamples gconf lconf))
       mp = fmap (clampToWord32 (showMaybeSrcLoc declSrcLoc)) (parallelism env gconf lconf)
       result = case mp of
-        Nothing -> checkSequential t (randomPoints (n - 1) seed) prop
-        Just m -> checkParallel m t (randomPoints (n - 1) seed) prop
-  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar t result)
+        Nothing -> checkSequential static (randomPoints (n - 1) seed) prop
+        Just m -> checkParallel m static (randomPoints (n - 1) seed) prop
+  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar static result)
   pure $! isNothing result
 
 -- | Run a composite. Note the ST-style trick: only composites which do not
 -- know anythig about the `property` type may be run.
 {-# INLINE composite #-}
-composite :: GlobalConfig -> (forall property. Declaration property) -> IO TestResult
+composite :: GlobalConfig -> (forall check . Declaration check) -> IO TestResult
 composite gconf decl = do
   env <- mkEnv
   initialSeed <- Random.newSMGen
@@ -382,14 +416,17 @@ composite gconf decl = do
 -- possible to stop the property test eary by throwing an exception. The check
 -- state is in a TVar that can be read after the exception is caught by the
 -- test runner.
-data StopTestEarly = StopTestEarly
+data StopTestEarly = StopTestEarly (MaybeSrcLoc)
 
-deriving instance Show StopTestEarly
+instance Show StopTestEarly where
+  show (StopTestEarly mloc) = mconcat
+    [ "Stopped early at ", showMaybeSrcLoc mloc ]
+
 instance Exception StopTestEarly
 
 {-# INLINE stop #-}
-stop :: Composite property x
-stop = Composite $ \_ -> throwIO StopTestEarly
+stop :: HasCallStack => Composite property x
+stop = Composite $ \_ -> throwIO (StopTestEarly (srcLocOf callStack))
 
 -- | Counterexample with extra information about where it came from.
 data FailingCase where
@@ -482,6 +519,19 @@ defaultLocalConfig :: LocalConfig
 defaultLocalConfig = LocalConfig
   { localParallelism = NoParallelism
   , localRandomSamples = 64
+  }
+
+serially :: Natural -> LocalConfig
+serially n = LocalConfig
+  { localParallelism = noParallelism
+  , localRandomSamples = n
+  }
+
+-- | Use this many samples, in parallel using the number of capabilities.
+inParallel :: Natural -> LocalConfig
+inParallel n = LocalConfig
+  { localParallelism = nCapabilities
+  , localRandomSamples = n
   }
 
 nsamples :: GlobalConfig -> LocalConfig -> Natural

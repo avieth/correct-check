@@ -79,8 +79,8 @@ test_simplification = Test
 -- Since we're testing search strategies, it only makes sense to use the strategy
 -- that is so obvious it need not be tested.
 
-domainFor :: Arbitrary (state, space) -> Domain () () (DynamicPart state space)
-domainFor gen = Domain
+exampleDomain :: Domain () () (DynamicPart () Natural)
+exampleDomain = Domain
   { search = trivialSearch
   , generate = do
       (state, space) <- gen
@@ -91,18 +91,9 @@ domainFor gen = Domain
         , seed = seed
         }
   }
-
-property_complication :: Property () () (DynamicPart () Natural) (Maybe Natural) Increases (StaticPart () Natural)
-property_complication = Property
-  { domain = domainFor g
-  , test = test_complication
-  }
-
-property_simplification :: Property () () (DynamicPart () Natural) [Natural] Decreases (StaticPart () Natural)
-property_simplification = Property
-  { domain = domainFor g
-  , test = test_simplification
-  }
+  where
+    gen :: Arbitrary ((), Natural)
+    gen = (,) () <$> genNatural 0 99
 
 localConfig :: LocalConfig
 localConfig = defaultLocalConfig
@@ -110,25 +101,29 @@ localConfig = defaultLocalConfig
   , localRandomSamples = 1024 * 4096
   }
 
-g :: Arbitrary ((), Natural)
-g = (,) () <$> genNatural 0 99
-
 main :: IO ()
 main = do
   -- Q: does it make sense to give the domain in the declaration??
   -- Maybe not! Should be able to apply any domain within the check.
   -- True enough. You should have to give
   -- - The LocalConfig
+  -- - The `Renderer state space spcimen result refutation static`
   -- - A name
-  -- - The Test dynamic result refutation static
-  -- - The Renderer state space spcimen result refutation static
+  -- - The `Test dynamic result refutation static`
+  --
   result <- composite defaultGlobalConfig $
-    declare "Linear search complication"   property_complication   viaPrettyRenderer localConfig $ \linearComplication ->
-    declare "Linear search simplification" property_simplification viaPrettyRenderer localConfig $ \linearSimplification ->
+    declare viaPrettyRenderer "Linear search complication"   test_complication   $ \complication ->
+    declare viaPrettyRenderer "Linear search simplification" test_simplification $ \simplification ->
     compose $ do
       -- FIXME seems more appropriate to take the strategy as the static part,
       -- under some fixed order.
-      check linearComplication   (StaticPart "Linear(1,0,99)" (linearSearchStrategy 1 0 99) ordPartialOrder)
-      check linearSimplification (StaticPart "Linear(1,0,99)" (linearSearchStrategy 1 0 99) ordPartialOrder)
+      check (serially 99)
+        complication
+        exampleDomain
+        (StaticPart "Linear(1,0,99)" (linearSearchStrategy 1 0 99) ordPartialOrder)
+      check (serially 99)
+        simplification
+        exampleDomain
+        (StaticPart "Linear(1,0,99)" (linearSearchStrategy 1 0 99) ordPartialOrder)
       pure ()
   printTestResult result

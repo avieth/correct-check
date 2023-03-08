@@ -93,14 +93,9 @@ shouldSimplify_5 = searchParallel 2 unitSearchStrategy () () (const (const (Just
 -- things are working properly, then a 'quickCheck' of this property should
 -- print the trace at most once. It will still claim to have run the test at
 -- as many samples as instructed, which may seem like a lie, but is it really?
-exampleUnitTest :: Property () () () Int String Int
-exampleUnitTest = Property
-  { domain = unitTestDomain
-  , test = unitTestDefinition
-  }
 
-unitTestDefinition :: Test () Int String Int
-unitTestDefinition = Test
+exampleUnitTest :: Test () Int String Int
+exampleUnitTest = Test
   { subject = Subject $ \n _ -> Debug.trace ("Evaluating unit test at " ++ show n) (sum [1..n])
   , expectations = that "Gauss was right" $ \n _ s -> s == n * (n + 1) `div` 2
   }
@@ -119,43 +114,39 @@ shouldMemoize_2 = checkParallel 8 100 (randomPoints 99 (mkSMGen 43)) exampleUnit
 -- the driver _will_ have to search through the space for a minimal failing,
 -- so the subject will be evaluated potentially more than once (GHC can't
 -- float it out).
-exampleNonUnitTest :: (forall t. String -> t -> t) -> Property () Natural Int Int String ()
-exampleNonUnitTest trace = Property
-  { domain = Domain
-      { search = Search
-          { strategy = linearSearchStrategy 3 0 200
-          , initialState = ()
-          , minimalSpace = 0
-          }
-      , generate = fromIntegral <$> parameter
+
+exampleNonUnitTestDomain :: Domain () Natural Int
+exampleNonUnitTestDomain = Domain
+  { search = Search
+      { strategy = linearSearchStrategy 3 0 200
+      , initialState = ()
+      , minimalSpace = 0
       }
-  , test = Test
-      { subject = Subject $ \_ n -> trace ("Evaluating non unit test at " ++ show n) (sum [1..n])
-      -- NB: a property test search will try to find a minimal example in which
-      -- _any_ of the expectations fail (it's a conjunction). It may find a
-      -- large example in which many fail, and then shrink it to one in which
-      -- only one of them fails.
-      -- Here they will both fail at 42, so they'll always both appear in the
-      -- report.
-      , expectations =
-             (that "Gauss was right" $ \_ n s -> if n >= 142 then False else (s == n * (n + 1) `div` 2))
-          .& (that "Silly property" $ \_ n s -> if n >= 142 then False else True)
-      }
+  , generate = fromIntegral <$> parameter
   }
 
--- The same non-unit test as above, but this one _does_ have randomness.
--- A 'quickCheck' of this one will have to search at every point.
-exampleNonUnitTestWithRandomness :: (forall t. String -> t -> t) -> Property () Natural Int Int String ()
-exampleNonUnitTestWithRandomness trace = base 
-  { domain = (domain base)
-    { generate = do
-        w8 <- genWord8
-        n <- parameter
-        pure (fromIntegral w8 + fromIntegral n)
-    }
+exampleNonUnitTestDomainWithRandomness ::  Domain () Natural Natural
+exampleNonUnitTestDomainWithRandomness = Domain
+  { search = search exampleNonUnitTestDomain
+  , generate = do
+      w8 <- genWord8
+      n <- parameter
+      pure (fromIntegral w8 + fromIntegral n)
   }
-  where
-    base = exampleNonUnitTest trace
+
+exampleNonUnitTest :: (forall t. String -> t -> t) -> Test Int Int String ()
+exampleNonUnitTest trace = Test
+  { subject = Subject $ \_ n -> trace ("Evaluating non unit test at " ++ show n) (sum [1..n])
+  -- NB: a property test search will try to find a minimal example in which
+  -- _any_ of the expectations fail (it's a conjunction). It may find a
+  -- large example in which many fail, and then shrink it to one in which
+  -- only one of them fails.
+  -- Here they will both fail at 42, so they'll always both appear in the
+  -- report.
+  , expectations =
+         (that "Gauss was right" $ \_ n s -> if n >= 142 then False else (s == n * (n + 1) `div` 2))
+      .& (that "Silly property" $ \_ n s -> if n >= 142 then False else True)
+  }
 
 -- Here's a property test which will search 2-dimensional space, checking that
 -- the static part is greater than the sum of squares of the search space, plus
@@ -168,27 +159,30 @@ exampleNonUnitTestWithRandomness trace = base
 --
 -- It's a silly property test, but it's enought to demonstrate that the driver
 -- is working.
-examplePropertyTest :: (forall t. String -> t -> t)
-                    -> Property ((), ()) (Natural, Natural) (Word8, Natural, Natural) Natural String Int
-examplePropertyTest trace = Property
-  { domain = Domain
-      { search = Search
-          { strategy = twoDimensionalSearchStrategy
-              (linearSearchStrategy 3 0 16)
-              (linearSearchStrategy 4 0 32)
-          , initialState = ((), ())
-          , minimalSpace = (0, 0)
-          }
-      , generate = do
-          (n, m) <- parameter
-          w8 <- genWord8
-          pure (w8, n, m)
+
+examplePropertyTestDomain :: Domain ((), ()) (Natural, Natural) (Word8, Natural, Natural)
+examplePropertyTestDomain = Domain
+  { search = Search
+      { strategy = twoDimensionalSearchStrategy
+          (linearSearchStrategy 3 0 16)
+          (linearSearchStrategy 4 0 32)
+      , initialState = ((), ())
+      , minimalSpace = (0, 0)
       }
-  , test = Test
-      { subject = Subject $ \_ (w8, n, m) -> n ^ 2 + m ^2 + fromIntegral w8
-      , expectations = (that "The threshold is greater" $ \t n s -> s < fromIntegral t)
-      }
+  , generate = do
+      (n, m) <- parameter
+      w8 <- genWord8
+      pure (w8, n, m)
   }
+
+examplePropertyTest :: (forall t. String -> t -> t)
+                    -> Test (Word8, Natural, Natural) Natural String Int
+examplePropertyTest trace = Test
+  { subject = Subject $ \_ (w8, n, m) -> n ^ 2 + m ^2 + fromIntegral w8
+  , expectations = (that "The threshold is greater" $ \t n s -> s < fromIntegral t)
+  }
+
+localConfig = defaultLocalConfig
 
 main :: IO ()
 main = do
@@ -221,17 +215,23 @@ main = do
   Debug.traceM "Begin composite test"
   mvar <- newMVar ()
   result <-
+    -- Run the composite with the default global configuration, returning the
+    -- test results, which we can pretty-print, serialize, ignore, whatever.
     composite defaultGlobalConfig $
-    declare "UNIT TEST" exampleUnitTest viaShowRenderer defaultLocalConfig $ \unitTest ->
-    declare "NON UNIT TEST" (exampleNonUnitTest (const id)) viaShowRenderer defaultLocalConfig $ \nonUnitTest ->
-    declare "NON UNIT TEST WITH RANDOMNESS" (exampleNonUnitTestWithRandomness (const id)) viaShowRenderer defaultLocalConfig $ \nonUnitTestWithRandomness ->
-    declare "PROPERTY TEST" (examplePropertyTest (const id)) viaShowRenderer defaultLocalConfig $ \propertyTest ->
+    -- Here we declare tests with labels, local configuration, and renderers.
+    -- The continuation functions give some universally-quantified abstract
+    -- thing that can be used in a call to 'check' within the composite: give it
+    -- a suitable domain and static part, and it will check it according to the
+    -- configuration.
+    declare viaShowRenderer "UNIT TEST" exampleUnitTest $ \unitTest ->
+    declare viaShowRenderer "NON UNIT TEST" (exampleNonUnitTest (const id)) $ \nonUnitTest ->
+    declare viaShowRenderer "PROPERTY TEST" (examplePropertyTest (const id)) $ \propertyTest ->
     compose $ do
-      b <- check unitTest 142
+      b <- check (serially 99) unitTest unitTestDomain 142
       effect (putStrLn $ "Passed? " ++ show b)
-      assert unitTest 143
-      check unitTest 144
-      check propertyTest (read str1)
+      assert (serially 99) unitTest unitTestDomain 143
+      check (serially 99) nonUnitTest exampleNonUnitTestDomain ()
+      check (serially 99) propertyTest examplePropertyTestDomain (read str1)
       -- For some reason, having a `() <-` can cause rewrite rules to not fire,
       -- and the non-random test not to simplify enough.
       --
@@ -242,20 +242,35 @@ main = do
       -- maybe causing GHC to not have any budget left to try our rules?
       --
       -- If we use 3 simplifier phases, it works.
-      assert unitTest 1042
-      check unitTest 142
+      assert (inParallel 256)
+        unitTest
+        unitTestDomain
+        1042
+      check (serially 256)
+        unitTest
+        unitTestDomain
+        142
       bracket (takeMVar mvar) (putMVar mvar) $ \_ -> do
-        assert unitTest 142
+        assert (serially 32)
+          unitTest
+          unitTestDomain
+          142
       effect (putStrLn $ "Passed? " ++ show b)
-      check propertyTest 1280
-      assert nonUnitTest ()
+      check (inParallel 128)
+        propertyTest
+        examplePropertyTestDomain
+        1280
       -- Why do we bother with composite/declare?
       -- After all, we can still run properties directly, and even via quickCheck
       -- because we can do IO for a new random seed.
-      effect (quickCheck (2 ^ 32 - 1) 200 exampleUnitTest >>= print)
+      effect (quickCheck (2 ^ 32 - 1) 200 (Property unitTestDomain exampleUnitTest) >>= print)
       -- The point of composite/declare is to put a barrier between the properties
       -- that may be tested, and everything else. It ensures that the arbitrary IO
       -- in the composite cannot interact with the TVar CheckState.
+      assert (inParallel 128)
+        nonUnitTest
+        exampleNonUnitTestDomain
+        ()
       pure ()
   -- The bracket within the composite ensures this will not block, even if
   -- unitTest failed at 142 and the assertion caused the composite to end
