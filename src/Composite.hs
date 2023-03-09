@@ -27,24 +27,10 @@ module Composite
   , check
   , assert
   , stop
-  , Check
   , StopTestEarly (..)
 
   , TestResult (..)
   , printTestResult
-
-  , Renderer (..)
-  , noRenderer
-  , viaShowRenderer
-  , viaPrettyRenderer
-  , PP.Pretty (..)
-  , fromString
-  , PP.vsep
-  , PP.hsep
-  , PP.indent
-  , PP.nest
-  , PP.hang
-  , (PP.<+>)
 
   , LocalConfig (..)
   , serially
@@ -62,19 +48,18 @@ import Control.Exception (SomeException, Exception, evaluate, throwIO, try)
 import Control.Monad (ap, unless)
 import qualified Control.Monad.IO.Class as Lift
 import qualified Control.Monad.IO.Unlift as Unlift
+import Check
 import Location
-import Property
+import Pretty
 import Types
 import Space.Random as Random
 import Data.Foldable (toList)
 import Data.List (intersperse)
 import Data.List.NonEmpty as NE (NonEmpty, nonEmpty)
 import Data.Word (Word32)
-import Driver (checkParallel, checkSequential)
 import Data.Maybe (isNothing)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Data.String (fromString)
 import qualified GHC.RTS.Flags as RTS (nCapabilities, getParFlags)
 import Prettyprinter (Doc)
 import qualified Prettyprinter as PP
@@ -110,36 +95,46 @@ splitStateSeed tvar = do
   writeTVar tvar $! st { checkStateSeed = s2 }
   pure s1
 
+-- | Counterexample with extra information about where it came from.
+data FailingCase where
+  FailingCase :: String
+              -> MaybeSrcLoc
+              -- ^ Of the declaration
+              -> MaybeSrcLoc
+              -- ^ Of the check
+              -> RenderTest specimen result assertion
+              -> RenderDomain space
+              -> Counterexample space specimen result assertion
+              -> FailingCase
+
 -- | Include a test counterexample in the state.
 addCounterexample :: String -- ^ Name of declaration
                   -> MaybeSrcLoc -- ^ Of declaration site
                   -> MaybeSrcLoc -- ^ Of check site
-                  -> Renderer state space dynamic result refutation static
+                  -> RenderTest specimen result assertion
+                  -> RenderDomain space
                   -> TVar CheckState
-                  -> Domain state space dynamic
-                  -> static
-                  -> Counterexample space dynamic result refutation
+                  -> Counterexample space specimen result assertion
                   -> STM ()
-addCounterexample name declSrcLoc checkSrcLoc renderer tvar dom t !cx = do
+addCounterexample name declSrcLoc checkSrcLoc renderTest renderDomain tvar !cx = do
   st <- readTVar tvar
   writeTVar tvar $! st
     { checkStateFailingTests =
                checkStateFailingTests st
-        Seq.|> FailingCase name declSrcLoc checkSrcLoc renderer dom t cx
+        Seq.|> FailingCase name declSrcLoc checkSrcLoc renderTest renderDomain cx
     }
 
 -- | Inlcude a test result. No change if it's a pass (Nothing).
 addPropertyTestResult :: String -- ^ Name of declaration
                       -> MaybeSrcLoc -- ^ Of declaration site
                       -> MaybeSrcLoc -- ^ Of check site
-                      -> Renderer state space dynamic result refutation static
+                      -> RenderTest specimen result assertion
+                      -> RenderDomain space
                       -> TVar CheckState
-                      -> Domain state space dynamic
-                      -> static
-                      -> Maybe (Counterexample space dynamic result refutation)
+                      -> Maybe (Counterexample space specimen result assertion)
                       -> STM ()
-addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar dom static =
-  maybe (pure ()) (addCounterexample name declSrcLoc checkSrcLoc renderer tvar dom static)
+addPropertyTestResult name declSrcLoc checkSrcLoc renderTest renderDomain tvar =
+  maybe (pure ()) (addCounterexample name declSrcLoc checkSrcLoc renderTest renderDomain tvar)
 
 -- | Well get this as the result of a composite test run.
 --
@@ -198,7 +193,7 @@ ppFailingCases :: NonEmpty FailingCase -> Doc AnsiStyle
 ppFailingCases = mconcat . intersperse PP.line . fmap ppFailingCase . toList
 
 ppFailingCase :: FailingCase -> Doc AnsiStyle
-ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderer dom staticPart cexample) = PP.vcat
+ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderTest renderDomain cexample) = PP.vcat
   [ PP.annotate PP.Ansi.bold (PP.annotate (PP.Ansi.color PP.Ansi.Red) (fromString "✘" PP.<+> fromString name))
   , PP.indent 2 $ PP.vsep
     [ PP.hsep
@@ -209,10 +204,13 @@ ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderer dom staticPart c
         [ boldString "Checked at   "
         , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc checkSrcLoc)
         ]
+    {-
+    -- TODO decide how to show a domain, if at all.
     , PP.hsep
         [ boldString "Over domain  "
         , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc (domainSrcLoc dom))
         ]
+    -}
     , PP.indent 14 $ PP.vsep
         [ PP.hang 2 $ PP.hsep
           [ fromString "with random seed"
@@ -220,41 +218,37 @@ ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderer dom staticPart c
           ]
         , PP.hang 2 $ PP.hsep
           [ fromString "and search part "
-          , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Yellow) (ppMaybe (renderSpace renderer) (searchPoint cexample))
+          , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Yellow) (ppMaybe (renderSpace renderDomain) (searchPoint cexample))
           ]
         ]
     , PP.hsep
-        [ boldString "Dynamic input"
-        , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Green) (ppMaybe (renderDynamic renderer) (dynamicPart cexample))
+        [ boldString "Specimen     "
+        , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Green) (ppMaybe (renderSpecimen renderTest) (generatedValue cexample))
         ]
     , PP.hsep
-        [ boldString "Static input "
-        , PP.annotate (PP.Ansi.color PP.Ansi.Magenta) (PP.nest 2 (ppMaybe (renderStatic renderer) staticPart))
+        [ boldString "Result       "
+        , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Blue) (ppMaybe (renderResult renderTest) (testResult cexample))
         ]
-    , PP.hsep
-        [ boldString "Output       "
-        , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Blue) (ppMaybe (renderResult renderer) (resultPart cexample))
-        ]
-    , boldString "Refuting " PP.<+> PP.indent 4 (ppRefutations renderer (refutations cexample))
+    , boldString "Refuting " PP.<+> PP.indent 4 (ppAssertions renderTest (refutations cexample))
     ]
   ]
   where boldString = PP.annotate PP.Ansi.bold . fromString
 
-ppRefutations :: Renderer state space dynamic result refutation static
-                 -> NonEmpty (Refutation refutation)
-                 -> Doc AnsiStyle
-ppRefutations renderer refutations = PP.vsep (fmap (ppRefutation renderer) (toList refutations))
-
-ppRefutation :: Renderer state space dynamic result refutation static
-             -> Refutation refutation
+ppAssertions :: RenderTest specimen result assertion
+             -> NonEmpty (Assertion assertion)
              -> Doc AnsiStyle
-ppRefutation renderer refutation = PP.hsep
-  [ PP.annotate (PP.Ansi.color PP.Ansi.Red) (ppMaybe (renderRefutation renderer) (refutationLabel refutation))
+ppAssertions renderTest assertions = PP.vsep (fmap (ppAssertion renderTest) (toList assertions))
+
+ppAssertion :: RenderTest specimen result assertion
+            -> Assertion assertion
+            -> Doc AnsiStyle
+ppAssertion renderTest assertion = PP.hsep
+  [ PP.annotate (PP.Ansi.color PP.Ansi.Red) (ppMaybe (renderAssertion renderTest) (assertionLabel assertion))
   , fromString "at"
-  , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc (refutationLocation refutation))
+  , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc (assertionLocation assertion))
   ]
 
-  {-
+{-
 ppIntercalateLines :: [Doc AnsiStyle] -> Doc AnsiStyle
 ppIntercalateLines = mconcat . intersperse line
   where
@@ -277,12 +271,12 @@ ppMaybe mPp t = case mPp of
 -- universally quantified during construction.
 newtype Composite check t = Composite
   { runComposite ::
-         (forall state space dynamic static .
+         (forall space specimen .
               MaybeSrcLoc -- Of the call site to this check in the composite
            -> LocalConfig
-           -> check state space dynamic static 
-           -> Domain state space dynamic -- The domain to use
-           -> static -- The static part
+           -> RenderDomain space
+           -> check specimen
+           -> Domain space specimen -- The domain to use
            -> IO Bool
          )
       -> IO t
@@ -321,42 +315,65 @@ effect_ = Lift.liftIO
 -- | Flipped 'runComposite'.
 {-# INLINE runCompositeAt #-}
 runCompositeAt ::
-     (forall state space dynamic static .
+     (forall space specimen .
           MaybeSrcLoc
        -> LocalConfig
-       -> check state space dynamic static
-       -> Domain state space dynamic
-       -> static
+       -> RenderDomain space
+       -> check specimen
+       -> Domain space specimen
        -> IO Bool
      )
   -> Composite check t
   -> IO t
 runCompositeAt k comp = runComposite comp k
 
--- | The `property` parameter of 'Composite' will be instantiated to this in
+-- | The `check` parameter of 'Composite' will be instantiated to this in
 -- order to run a composite test.
 --
 -- There is the static environment, the global configuration, both of which come
--- from the driver and not from the local property declaration.
+-- from the driver and not from the local test declaration.
+--
 -- The MaybeSrcLoc is the place where the check was called in the composite (not
 -- where it was declared).
-newtype Check state space dynamic static = Check (Env -> GlobalConfig -> MaybeSrcLoc -> TVar CheckState -> LocalConfig -> Domain state space dynamic -> static -> IO Bool)
+newtype Check specimen = Check
+  { runCheck :: forall space .
+                Env
+             -> GlobalConfig
+             -> MaybeSrcLoc
+             -> TVar CheckState
+             -> LocalConfig
+             -> RenderDomain space
+             -> Domain space specimen
+             -> IO Bool
+  }
 
 {-# INLINE runCompositeCheck #-}
 runCompositeCheck :: Env -> GlobalConfig -> TVar CheckState -> Composite Check t -> IO t
-runCompositeCheck env gconf tvar (Composite k) = k (\srcLoc lconf (Check f) -> f env gconf srcLoc tvar lconf)
+runCompositeCheck env gconf tvar (Composite k) =
+  k (\srcLoc lconf renderDomain (Check f) -> f env gconf srcLoc tvar lconf renderDomain)
 
 -- | This will check a property within a composite. It will force the evaluation
 -- of the property up to the determination of whether it passes or not.
 {-# INLINE check #-}
-check :: HasCallStack => LocalConfig -> check state space dynamic static -> Domain state space dynamic -> static -> Composite check Bool
-check lconf prop domain x = Composite $ \k -> k (srcLocOf callStack) lconf prop domain x >>= evaluate
+check :: HasCallStack
+      => LocalConfig
+      -> RenderDomain space
+      -> check specimen
+      -> Domain space specimen
+      -> Composite check Bool
+check lconf render prop domain = Composite $ \k ->
+  k (srcLocOf callStack) lconf render prop domain >>= evaluate
 
 -- | 'check' but stops the test if it's a failure.
 {-# INLINE assert #-}
-assert :: HasCallStack => LocalConfig -> check state space dynamic static -> Domain state space dynamic -> static -> Composite check ()
-assert lconf prop domain x = withFrozenCallStack (do
-  b <- check lconf prop domain x
+assert :: HasCallStack
+       => LocalConfig
+      -> RenderDomain space
+       -> check specimen
+       -> Domain space specimen
+       -> Composite check ()
+assert lconf render prop domain = withFrozenCallStack (do
+  b <- check lconf render prop domain
   -- FIXME would be better to give an exception that shows it was an
   -- assertion that caused the early exit?
   unless b (stopWithExplanation "assertion failed"))
@@ -366,10 +383,11 @@ assert lconf prop domain x = withFrozenCallStack (do
 -- `check` be universally quanitified (similar to the ST trick).
 newtype Declaration check = Declaration
   { runDeclaration ::
-         (forall state space dynamic static .
-           Check state space dynamic static -> check state space dynamic static
+         (forall specimen .
+           Check specimen -> check specimen
          )
-      -> Composite check () }
+      -> Composite check ()
+  }
 
 -- INLINEs on compose, declare, and composite are very important. Without it,
 -- GHC won't be able to simplify unit tests in composites.
@@ -381,40 +399,39 @@ compose comp = Declaration (\_ -> comp)
 -- | Declare a property, to allow for its use in a composite.
 {-# INLINE CONLIKE declare #-}
 declare :: HasCallStack
-        => Renderer state space dynamic result refutation static
+        => RenderTest specimen result assertion
         -> String
-        -> Test dynamic result refutation static
-        -> (check state space dynamic static -> Declaration check)
+        -> Test assertion specimen result
+        -> (check specimen -> Declaration check)
         -> Declaration check
-declare renderer name test k = Declaration $ \toCheck ->
-  runDeclaration (k (toCheck (Check (checkOne name (srcLocOf callStack) test renderer)))) toCheck
+declare renderTest name test k = Declaration $ \toCheck ->
+  runDeclaration (k (toCheck (Check (checkOne name (srcLocOf callStack) test renderTest)))) toCheck
 
 -- | Takes the source location of the declaration, and also of the call to
 -- check/assert.
 {-# INLINE checkOne #-}
 checkOne :: String -- ^ Name of the declaration
          -> MaybeSrcLoc -- ^ Location of the declaration
-         -> Test dynamic result refutation static
-         -> Renderer state space dynamic result refutation static
+         -> Test assertion specimen result
+         -> RenderTest specimen result assertion
          -> Env
          -> GlobalConfig
          -> MaybeSrcLoc -- ^ Location of the call to check within the Composite
          -> TVar CheckState
          -> LocalConfig
-         -> Domain state space dynamic
-         -> static
+         -> RenderDomain space
+         -> Domain space specimen
          -> IO Bool
-checkOne name declSrcLoc test renderer env gconf checkSrcLoc tvar lconf dom static = do
+checkOne name declSrcLoc test renderTest env gconf checkSrcLoc tvar lconf renderDomain domain = do
   seed <- atomically (splitStateSeed tvar)
-  let prop = Property dom test
   -- FIXME if the config asks for 0 random samples, we should quit. Just like
   -- the quickCheck driver.
   let n = max 1 (clampToWord32 (showMaybeSrcLoc declSrcLoc) (nsamples gconf lconf))
       mp = fmap (clampToWord32 (showMaybeSrcLoc declSrcLoc)) (parallelism env gconf lconf)
       result = case mp of
-        Nothing -> checkSequential static (randomPoints (n - 1) seed) prop
-        Just m -> checkParallel m static (randomPoints (n - 1) seed) prop
-  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderer tvar dom static result)
+        Nothing -> checkSequential (randomPoints (n - 1) seed) domain test
+        Just m -> checkParallel m (randomPoints (n - 1) seed) domain test
+  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderTest renderDomain tvar result)
   pure $! isNothing result
 
 -- | Run a composite. Note the ST-style trick: only composites which do not
@@ -423,7 +440,7 @@ checkOne name declSrcLoc test renderer env gconf checkSrcLoc tvar lconf dom stat
 composite :: GlobalConfig -> (forall check . Declaration check) -> IO TestResult
 composite gconf decl = do
   env <- mkEnv
-  initialSeed <- Random.newSMGen
+  initialSeed <- Random.newSeedIO
   tvar <- initialCheckStateIO initialSeed
   outcome <- try (runCompositeCheck env gconf tvar (runDeclaration decl id))
   finalState <- readTVarIO tvar
@@ -451,66 +468,6 @@ stop = Composite $ \_ -> throwIO (StopTestEarly "stop test" (srcLocOf callStack)
 stopWithExplanation :: HasCallStack => String -> Composite check x
 stopWithExplanation str = Composite $ \_ -> throwIO (StopTestEarly str (srcLocOf callStack))
 
--- | Counterexample with extra information about where it came from.
-data FailingCase where
-  FailingCase :: String
-              -> MaybeSrcLoc
-              -- ^ Of the declaration
-              -> MaybeSrcLoc
-              -- ^ Of the check
-              -> Renderer state space dynamic result refutation static
-              -> Domain state space dynamic
-              -- ^ The domain used in the test
-              -> static
-              -> Counterexample space dynamic result refutation
-              -> FailingCase
-
--- | Rendering information about the types of a property, useful for showing
--- diagnostic information.
-data Renderer state space specimen result refutation static = Renderer
-  { renderState :: forall ann . Maybe (state -> Doc ann)
-  , renderSpace :: forall ann . Maybe (space -> Doc ann)
-  , renderDynamic :: forall ann . Maybe (specimen -> Doc ann)
-  , renderResult :: forall ann . Maybe (result -> Doc ann)
-  , renderRefutation :: forall ann . Maybe (refutation -> Doc ann)
-  , renderStatic :: forall ann . Maybe (static -> Doc ann)
-  }
-
-noRenderer :: Renderer state space dynamic result refutation static
-noRenderer = Renderer
-  { renderState = Nothing
-  , renderSpace = Nothing
-  , renderDynamic = Nothing
-  , renderResult = Nothing
-  , renderRefutation = Nothing
-  , renderStatic = Nothing
-  }
-
-viaShowRenderer :: (Show state, Show space, Show dynamic, Show result, Show refutation, Show static)
-                  => Renderer state space dynamic result refutation static
-viaShowRenderer = Renderer
-  { renderState = Just tshow
-  , renderSpace = Just tshow
-  , renderDynamic = Just tshow
-  , renderResult = Just tshow
-  , renderRefutation = Just tshow
-  , renderStatic = Just tshow
-  }
-  where
-    tshow :: Show t => t -> Doc ann
-    tshow = PP.viaShow
-
-viaPrettyRenderer :: (PP.Pretty state, PP.Pretty space, PP.Pretty dynamic, PP.Pretty result, PP.Pretty refutation, PP.Pretty static)
-                  => Renderer state space dynamic result refutation static
-viaPrettyRenderer = Renderer
-  { renderState = Just PP.pretty
-  , renderSpace = Just PP.pretty
-  , renderDynamic = Just PP.pretty
-  , renderResult = Just PP.pretty
-  , renderRefutation = Just PP.pretty
-  , renderStatic = Just PP.pretty
-  }
-
 data Env = Env
   { envCapabilities :: !Word32
   }
@@ -529,7 +486,7 @@ data GlobalConfig = GlobalConfig
   }
 
 defaultGlobalConfig :: GlobalConfig
-defaultGlobalConfig= GlobalConfig
+defaultGlobalConfig = GlobalConfig
   { globalMaximumParallelism = Nothing
   , globalMaximumRandomSamples = Nothing
   }

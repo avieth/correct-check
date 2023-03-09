@@ -2,7 +2,8 @@ module Space.Search
   (
   -- * Searching a space at a particular random point.
     Strategy (..)
-  , runStrategy
+  , SearchDef (..)
+  , searchWith
 
   -- * Searching over multiple random points.
   , searchSequential
@@ -10,12 +11,15 @@ module Space.Search
   , searchParallel
   , searchParallelAll
 
-  -- * Various search strategies
-  , trivialSearchStrategy
-  , unitSearchStrategy
-  , linearSearchStrategy
-  , powerSearchStrategy
-  , twoDimensionalSearchStrategy
+  -- * Various search definitions
+  , trivialStrategy
+  , trivialSearchDef
+  , linearStrategy
+  , linearSearchDef
+  , powerStrategy
+  , powerSearchDef
+  , twoDimensionalStrategy
+  , twoDimensionalSearchDef
   ) where
 
 import Control.Applicative ((<|>))
@@ -28,6 +32,16 @@ import Numeric.Natural (Natural)
 import Space.Random as Random
 import GHC.Base (build)
 
+-- | Obvious definition is
+--
+--   data Strategy space where
+--     Strategy :: SearchDef state space -> state -> space -> Strategy space
+--
+-- but will it prohibit good inlining and simplification? I don't know, but
+-- this one probably will inline better.
+newtype Strategy space = Strategy
+  { runStrategy :: forall r . (forall state. SearchDef state space -> state -> space -> r) -> r }
+
 -- | Defines how to search an ordered space. These may use random generators
 -- which do not depend upon any space (randomness only).
 --
@@ -39,7 +53,7 @@ import GHC.Base (build)
 -- A similar notion of simplification is here too, but it should randomly
 -- choose a maximally-less-complicated point, because shrinking needs to go
 -- in minimal steps in order to work properly.
-data Strategy state space = Strategy
+data SearchDef state space = SearchDef
   { complicate :: Seed -> state -> space -> Maybe (state, space)
   -- ^ If Just, then the space must be strictly more complicated.
   , simplify :: Seed -> state -> space -> [(state, space)]
@@ -47,15 +61,16 @@ data Strategy state space = Strategy
   }
 
 -- | Never grows, never shrinks.
-trivialSearchStrategy :: Strategy state space
-trivialSearchStrategy = Strategy
+trivialSearchDef :: SearchDef state space
+trivialSearchDef = SearchDef
   { complicate = \_ _ _ -> Nothing
   , simplify = \_ _ _ -> []
   }
 
--- | The only sensible way to search the single-element space.
-unitSearchStrategy :: Strategy state ()
-unitSearchStrategy = trivialSearchStrategy
+-- | Always give (), no growing or shrinking.
+{-# INLINE trivialStrategy #-}
+trivialStrategy :: Strategy ()
+trivialStrategy = Strategy $ \k -> k trivialSearchDef () ()
 
 -- | Similar to hedgehog: increases a single "size" parameter to an upper
 -- bound. This one is linear: it will always increase by a constant factor.
@@ -65,30 +80,40 @@ unitSearchStrategy = trivialSearchStrategy
 --
 -- NB: using a coefficient of 1 may not be desirable, because it means shrinking
 -- is useless: the minimal failing case will always be found on the way up.
-linearSearchStrategy :: Natural -> Natural -> Natural -> Strategy state Natural
-linearSearchStrategy c lowerBound upperBound = Strategy
+linearSearchDef :: Natural -> Natural -> Natural -> SearchDef state Natural
+linearSearchDef c lowerBound upperBound = SearchDef
   { complicate = \_ st n -> if n >= upperBound then Nothing else Just (st, (n + 1) * c)
   , simplify = \_ st n -> if n <= lowerBound then [] else [(st, n-1)]
   }
 
+-- | 'linearSearchDef' starting at 0.
+{-# INLINE linearStrategy #-}
+linearStrategy :: Natural -> Natural -> Natural -> Strategy Natural
+linearStrategy c l u = Strategy $ \k -> k (linearSearchDef c l u) () 0
+
 -- | Instead of multiplying by c, as in 'linearSearchStrategy', this one will
 -- take the c'th power of the current point.
-powerSearchStrategy :: Natural -> Natural -> Natural -> Strategy state Natural
-powerSearchStrategy c lowerBound upperBound = Strategy
+powerSearchDef :: Natural -> Natural -> Natural -> SearchDef state Natural
+powerSearchDef c lowerBound upperBound = SearchDef
   { complicate = \_ st n -> if n >= upperBound then Nothing else Just (st, (n + 1) ^ c)
   , simplify = \_ st n -> if n <= lowerBound then [] else [(st, n-1)]
   }
+
+-- | 'powerSearchDef' starting at 0.
+{-# INLINE powerStrategy #-}
+powerStrategy :: Natural -> Natural -> Natural -> Strategy Natural
+powerStrategy c l u = Strategy $ \k -> k (powerSearchDef c l u) () 0
 
 -- TODO
 -- wouldn't it be better to use the state parameter, in linear and exponential,
 -- to track how many times it has been increased? 
 -- Still not actually clear whether having the state parameter is useful at all.
 
-twoDimensionalSearchStrategy :: forall s1 s2 a b .
-                                Strategy s1 a
-                             -> Strategy s2 b
-                             -> Strategy (s1, s2) (a, b)
-twoDimensionalSearchStrategy first second = Strategy
+twoDimensionalSearchDef :: forall s1 s2 a b .
+                           SearchDef s1 a
+                        -> SearchDef s2 b
+                        -> SearchDef (s1, s2) (a, b)
+twoDimensionalSearchDef first second = SearchDef
   { complicate = complicateProduct
   , simplify = simplifyProduct
   }
@@ -112,6 +137,12 @@ twoDimensionalSearchStrategy first second = Strategy
           onlyR = (\(s2, y) -> ((s1, s2), (x, y))) <$> r
        in both <|> onlyL <|> onlyR
 
+{-# INLINE twoDimensionalStrategy #-}
+twoDimensionalStrategy :: Strategy l -> Strategy r -> Strategy (l, r)
+twoDimensionalStrategy l r = Strategy $ \k ->
+  runStrategy l $ \lDef lState lSpace ->
+    runStrategy r $ \rDef rState rSpace -> 
+      k (twoDimensionalSearchDef lDef rDef) (lState, rState) (lSpace, rSpace)
 
 -- | Use a strategy to find a minimal failing example. It's defined with this
 -- type and in this way so that it inlines well, given where and how it is called
@@ -119,20 +150,20 @@ twoDimensionalSearchStrategy first second = Strategy
 --
 -- The `space` given will not be simplified in case a failure is found here, and
 -- so it should always be a minimal space.
-{-# INLINE runStrategy #-}
-runStrategy :: forall state space failure .
-                Strategy state space
-             -> state
-             -- ^ Start state for the search.
-             -> space
-             -- ^ This is assumed to be a _minimal_ search space point.
-             -- If the test fails at the this point, it will not be shrunk.
-             -> (Seed -> space -> Maybe failure)
-             -> Seed
-             -- ^ Will be split and used in the search strategy, and also the
-             -- search predicate.
-             -> Maybe (state, space, failure)
-runStrategy strat initialState minimalSpace p = splitK $ \g1 g2 ->
+{-# INLINE searchWith #-}
+searchWith :: forall state space failure .
+              SearchDef state space
+           -> state
+           -- ^ Start state for the search.
+           -> space
+           -- ^ This is assumed to be a _minimal_ search space point.
+           -- If the test fails at the this point, it will not be shrunk.
+           -> (Seed -> space -> Maybe failure)
+           -> Seed
+           -- ^ Will be split and used in the search strategy, and also the
+           -- search predicate.
+           -> Maybe (state, space, failure)
+searchWith searchDef initialState minimalSpace p = splitK $ \g1 g2 ->
   -- splitK is used because it inlines well.
   --
   -- We're interested in the case where the function
@@ -148,7 +179,7 @@ runStrategy strat initialState minimalSpace p = splitK $ \g1 g2 ->
   --
   -- So the goal is that
   --
-  --   runStrategy strat state space (\_ _ c)
+  --   searchWith searchDef state space (\_ _ c)
   --
   -- would simplify to
   --
@@ -165,7 +196,7 @@ runStrategy strat initialState minimalSpace p = splitK $ \g1 g2 ->
   -- generation and evaluate the test at most once.
   let f = p g1
       here = f minimalSpace
-      others = searchStrategyNonMinimal (complicate strat) (simplify strat) f (g2, (initialState, minimalSpace))
+      others = searchStrategyNonMinimal (complicate searchDef) (simplify searchDef) f (g2, (initialState, minimalSpace))
       -- The idea is that if p is constant, then GHC will float it out and
       -- we'll be left with a constant function which does this case on the
       -- let-floated value `here`.
@@ -236,8 +267,8 @@ minimize simplify p (g, (state, space)) failure = split g $ \g1 g2 ->
         Nothing -> Nothing
         Just y -> Just (x, y)
 
-"headOfListMapMaybeParallelConst1" forall n m strat r xs .
-    headOfList (mapMaybeParallel (\_ -> r) n m strat xs)
+"headOfListMapMaybeParallelConst1" forall n m searchDef r xs .
+    headOfList (mapMaybeParallel (\_ -> r) n m searchDef xs)
   = case xs of
       [] -> Nothing
       (x:_) -> case r of
@@ -263,14 +294,14 @@ minimize simplify p (g, (state, space)) failure = split g $ \g1 g2 ->
 -- | Uses 'searchSpace' at each seed. For those which have a failing example,
 -- the minimal space is given along with its search state.
 searchSequentialAll :: forall state space failure .
-                       Strategy state space
+                       SearchDef state space
                     -> state
                     -> space
                     -> (Seed -> space -> Maybe failure)
                     -> RandomPoints
                     -> [(Seed, (state, space, failure))]
-searchSequentialAll strategy initialState startSpace p =
-    mapMaybeWithPoint (runStrategy strategy initialState startSpace p)
+searchSequentialAll searchDef initialState startSpace p =
+    mapMaybeWithPoint (searchWith searchDef initialState startSpace p)
   . NE.toList
   . Random.points
   where
@@ -278,7 +309,7 @@ searchSequentialAll strategy initialState startSpace p =
 {-# INLINE searchSequential #-}
 -- | 'searchSequentialAll' but takes the first failing case.
 searchSequential :: forall state space failure .
-                     Strategy state space
+                     SearchDef state space
                   -> state
                   -> space
                   -> (Seed -> space -> Maybe failure)
@@ -294,14 +325,14 @@ searchSequential strategy initialState startSpace p =
 -- phases are all sequential.
 searchParallelAll :: forall state space failure .
                      Word32 -- ^ How much parallelism
-                  -> Strategy state space
+                  -> SearchDef state space
                   -> state
                   -> space
                   -> (Seed -> space -> Maybe failure)
                   -> RandomPoints
                   -> [(Seed, (state, space, failure))]
-searchParallelAll parallelism strategy initialState startSpace p rpoints =
-  mapMaybeParallel (runStrategy strategy initialState startSpace p) (fromIntegral parallelism) (Random.count rpoints) pstrat (NE.toList (Random.points rpoints))
+searchParallelAll parallelism searchDef initialState startSpace p rpoints =
+  mapMaybeParallel (searchWith searchDef initialState startSpace p) (fromIntegral parallelism) (Random.count rpoints) pstrat (NE.toList (Random.points rpoints))
   where
     -- Evaluation strategy for each element? We only need to figure out whether
     -- it's Just or Nothing, and that's done by mapMaybeParallel.
@@ -320,7 +351,7 @@ searchParallelAll parallelism strategy initialState startSpace p rpoints =
 -- be found faster than it would have been by 'searchSequential'.
 searchParallel :: forall state space failure .
                   Word32 -- ^ How much parallelism
-               -> Strategy state space
+               -> SearchDef state space
                -> state
                -> space
                -> (Seed -> space -> Maybe failure)

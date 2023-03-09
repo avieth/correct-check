@@ -26,16 +26,18 @@ module Space.Random
   , randomPoints
 
   -- * Things to do with splitmix generators
-  , Seed
+  , Seed (..)
   , newSeedIO
   , split
   , splitK
   , splitTuple
   , splitN
-  , splitUnfold
   , splitUnfoldN
   , SM.mkSMGen
   , SM.newSMGen
+  , SM.seedSMGen
+  , SM.seedSMGen'
+  , SM.unseedSMGen
 
   -- * Useful for showing seeds on failing tests, and reloading them to rerun
   , prettySeedHex
@@ -50,20 +52,27 @@ module Space.Random
 import Prelude hiding (id, (.))
 import Control.Category
 import Control.Monad (ap, replicateM)
-import Data.String (fromString)
 import Numeric (readHex, showHex)
 import Numeric.Natural (Natural)
 import Data.List (unfoldr)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Data.Word
+import Pretty
 import Prettyprinter (Doc)
 import System.Random.SplitMix (SMGen)
 import qualified System.Random.SplitMix as SM
 import Space.Ordered
 
 -- | The splitmix generator is our random seed.
-type Seed = SMGen
+newtype Seed = Seed SMGen
+  deriving (Show)
+
+instance Eq Seed where
+  Seed l == Seed r = SM.unseedSMGen l == SM.unseedSMGen r
+
+instance Pretty Seed where
+  pretty = prettySeedHex
 
 -- | `Seed -> space -> (Seed, t)` but in CPS.
 --
@@ -75,7 +84,7 @@ type Seed = SMGen
 -- @
 --
 -- otherGenerator is always run with the same seed, regardless of the value of n.
-newtype Gen space t = Gen { unGen :: forall r. Seed -> space -> (Seed -> t -> r) -> r }
+newtype Gen space t = Gen { unGen :: forall r. SMGen -> space -> (SMGen -> t -> r) -> r }
 
 instance Functor (Gen space) where
   {-# INLINE fmap #-}
@@ -89,7 +98,7 @@ instance Applicative (Gen space) where
 instance Monad (Gen space) where
   return = pure
   {-# INLINE (>>=) #-}
-  left >>= k = Gen $ \smgen space l -> split smgen $ \smgen1 smgen2 ->
+  left >>= k = Gen $ \smgen space l -> split (Seed smgen) $ \(Seed smgen1) (Seed smgen2) ->
     -- Essential to split here, so that the structure of the left term does
     -- not affect the seed that is given to the term after the bind.
     unGen left smgen1 space $ \_smgen3 t ->
@@ -100,15 +109,15 @@ type Arbitrary = Gen ()
 
 -- | Use system entropy sources (uses System.Random.SplitMix.initSMGen)
 newSeedIO :: IO Seed
-newSeedIO = SM.initSMGen
+newSeedIO = Seed <$> SM.initSMGen
 
 {-# INLINE CONLIKE sampleAt #-}
 sampleAt :: Seed -> space -> Gen space t -> t
-sampleAt seed space gen = unGen gen seed space $ \_ t -> t
+sampleAt (Seed g) space gen = unGen gen g space $ \_ t -> t
 
 {-# INLINE CONLIKE sampleAt_ #-}
 sampleAt_ :: Gen space t -> Seed -> space -> t
-sampleAt_ gen seed = \space -> unGen gen seed space $ \_ t -> t
+sampleAt_ gen (Seed g) = \space -> unGen gen g space $ \_ t -> t
 
 -- | Picks a random seed. Intended for playing around / testing this library.
 sampleIO :: space -> Gen space t -> IO t
@@ -116,7 +125,7 @@ sampleIO space gen = newSeedIO >>= \smgen -> pure (sampleAt smgen space gen)
 
 {-# INLINE split #-}
 split :: Seed -> (Seed -> Seed -> t) -> t
-split smgen k = let (g1, g2) = SM.splitSMGen smgen in k g1 g2
+split (Seed g) k = let (g1, g2) = SM.splitSMGen g in k (Seed g1) (Seed g2)
 
 {-# INLINE splitK #-}
 splitK :: (Seed -> Seed -> t) -> Seed -> t
@@ -141,20 +150,15 @@ splitN n g = g NE.:| splitUnfoldN n g
 -- Could also use
 --   splitN n g = g NE.:| take (fromIntegral n) (splitUnfold g)
 
-{-# INLINE splitUnfold #-}
--- | An infinite list of seeds derived via split from the given seed.
-splitUnfold :: Seed -> [Seed]
-splitUnfold = unfoldr (Just . SM.splitSMGen)
-
 -- | Like 'splitUnfold' but explicitly limits the size of the list.
 {-# INLINE splitUnfoldN #-}
 splitUnfoldN :: Word32 -> Seed -> [Seed]
-splitUnfoldN n seed = unfoldr
+splitUnfoldN n (Seed g) = unfoldr
   (\(m, g) -> if m == 0
               then Nothing
-              else Just (let (g1, g2) = SM.splitSMGen g in (g1, (m-1, g2)) )
+              else Just (let (g1, g2) = SM.splitSMGen g in (Seed g1, (m-1, g2)) )
   )
-  (n, seed)
+  (n, g)
 
 -- | A list of seeds and its length, which can be useful to know.
 -- This should always be
@@ -192,7 +196,7 @@ parameter = Gen $ \smgen space k -> k smgen space
 
 -- | Splits the current seed and gives the first half.
 genSeed :: Gen space Seed
-genSeed = Gen $ \smgen _ k -> split smgen k
+genSeed = Gen $ \g _ k -> split (Seed g) $ \(Seed g') seed -> k g' seed
 
 genWord8 :: Gen space Word8
 genWord8 = Gen $ \smgen _ k -> let (w32, smgen') = SM.nextWord32 smgen in k smgen' (fromIntegral w32)
@@ -275,18 +279,26 @@ listOfLength len = listOf (fromParameter len)
 listOfKnownLength :: Natural -> Gen space t -> Gen space [t]
 listOfKnownLength len = listOf (fromParameter (constant len))
 
-prettySeedHex :: SMGen -> Doc ann
+prettySeedHex :: Seed -> Doc ann
 prettySeedHex = fromString . showSeedHex
 
-showSeedHex :: SMGen -> String
-showSeedHex smgen = let (w1, w2) = SM.unseedSMGen smgen in (showHex w1 <> showHex w2) ""
+-- TODO property test that read/show roundtrip.
 
-readSeedHex :: String -> Maybe SMGen
+showSeedHex :: Seed -> String
+showSeedHex (Seed smgen) = let (w1, w2) = SM.unseedSMGen smgen in ((padHex . showHex w1) <> (padHex . showHex w2)) ""
+
+-- | Pads the hex string on the left with 0s until 16 hex digits.
+padHex :: String -> String
+padHex str = if l < 16 then replicate (16 - l) '0' ++ str else str
+  where l = length str
+
+-- | Assumes it's 2 16-character hex-encoded numbers concatenated
+readSeedHex :: String -> Maybe Seed
 readSeedHex str = do
   let (str1, str2) = splitAt 16 str
   w1 <- fromHex str1
   w2 <- fromHex str2
-  Just (SM.seedSMGen' (w1, w2))
+  Just (Seed (SM.seedSMGen' (w1, w2)))
   where
     fromHex :: String -> Maybe Word64
     fromHex str = case readHex str of

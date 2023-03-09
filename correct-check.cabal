@@ -18,14 +18,16 @@ common warnings
 library
     import:           warnings
     exposed-modules:  Composite
-                      Driver
+                      Check
+                      Quick.Check
                       Location
-                      Property
+                      Pretty
                       Space
                       Space.Ordered
                       Space.Random
                       Space.Search
                       Types
+                      Unit
     -- other-modules:
     -- other-extensions:
     build-depends:    base,
@@ -46,7 +48,6 @@ executable examples
     main-is:          Main.hs
     other-modules:    Basic
                       Strategy
-                      UnitTest
     build-depends:    base,
                       correct-check,
                       async

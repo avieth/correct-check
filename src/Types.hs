@@ -1,182 +1,110 @@
 module Types
-  (
-  -- * Test definitions
-    Test (..)
-  , satisfies
+  ( Test (..)
+
+  -- * Test subject and verification
   , Subject (..)
   , Verification (..)
+  , passes
+  , fails
+
+  -- * Expectations
   , Expectation (..)
-  , Refutation (..)
   , Expectations
-
-  -- * Domains
-  , Domain (..)
-  , domain
-  , Search (..)
-  , trivialSearch
-
-  -- * Generic conjunctions
+  , Assertion (..)
   , Conjunction (..)
   , (.&)
   , that
   , runConjunction
 
-  -- * Counterexample
-  , Counterexample (..)
+  -- * Domains
+  , Domain (..)
 
   -- * Re-export
   , Strategy (..)
+  , Gen (..)
   , Natural
   ) where
 
-import Prelude hiding (id, (.))
-import Data.Functor.Contravariant
 import Numeric.Natural (Natural)
-import Location (HasCallStack, MaybeSrcLoc, srcLocOf, callStack)
+import Location
 import Space.Random as Random
 import Space.Search as Search
-import Data.List.NonEmpty (NonEmpty)
 
-data Search state space = Search
-  { strategy :: Strategy state space
-  , initialState :: state
-  , minimalSpace :: space
-  }
+-- | A test subject. Any pure function.
+newtype Subject specimen result = Subject
+  { runSubject :: specimen -> result }
 
-trivialSearch :: Search () ()
-trivialSearch = Search
-  { strategy = trivialSearchStrategy
-  , initialState = ()
-  , minimalSpace = ()
-  }
+-- | Verification of a Subject. Defining properties are 'passes' and 'fails'.
+newtype Verification specimen result = Verification
+  { runVerification :: specimen -> result -> Bool }
 
--- | A generator and a search space, along with a source location. Intended to
--- be constructed with the 'domain' function which will give a source location.
---
--- The search and generate members cannot be shown, so the source location
--- serves as the only useful thing that we can display.
-data Domain state space dynamic = Domain
-  { domainSrcLoc :: MaybeSrcLoc
-  , search :: Search state space
-  , generate :: Gen space dynamic
-  }
+passes :: Subject specimen result -> Verification specimen result -> specimen -> Bool
+passes sub ver s = runVerification ver s (runSubject sub s)
 
-domain :: HasCallStack => Search state space -> Gen space dynamic -> Domain state space dynamic
-domain s g = Domain
-  { domainSrcLoc = srcLocOf callStack
-  , search = s
-  , generate = g
-  }
+fails :: Subject specimen result -> Verification specimen result -> specimen -> Bool
+fails sub ver = not . passes sub ver
 
--- | A subject and expectations.
---
--- This doesn't come with a source location because it's a contravariant
--- functor. When it comes to displaying information about failed tests, it will
--- always be clear which test failed because either
--- - it was run directly, e.g. by a call to 'quickCheck' or
--- - it was run as part of a composite (see the module 'Composite') in which
---   case it was declared at a fixed static type, and the source location of
---   that declaration is known
-data Test dynamic result refutation static = Test
-  -- FIXME should be called assertion not refutation
-  { subject :: Subject dynamic result static
-  , expectations :: Expectations refutation dynamic result static
-  }
+data Expectation assertion specimen result where
+  Expectation :: Assertion assertion -> Verification specimen result -> Expectation assertion specimen result
 
-instance Contravariant (Test specimen result refutation) where
-  contramap f test = Test
-    { subject = contramap f (subject test)
-    , expectations = contramap f (expectations test)
-    }
-
-satisfies :: Subject dynamic result static -> Expectations refutation dynamic result static -> Test dynamic result refutation static
-satisfies s e = Test { subject = s, expectations = e }
-
--- | A test subject: given the static and dynamic (from the search space) parts,
--- come up with a result. Meaningful in relation to 'Verification' and
--- 'Expectation'.
-newtype Subject dynamic result static = Subject
-  { runSubject :: static -> dynamic -> result }
-
-instance Contravariant (Subject dynamic result) where
-  contramap f (Subject k) = Subject $ \param -> k (f param)
-
--- | Whereas a 'Subject d r s' gives a functional relation `(s, d, r)`,
--- 'Verification d r s' gives a subset of that relation, to be interpreted as
--- every tuple which is _expected_ to be part of the functional relation. A
--- property test will check that these relations coincide.
-newtype Verification dynamic result static = Verification
-  { runVerification :: static -> dynamic -> result -> Bool }
-
-instance Contravariant (Verification dynamic result) where
-  contramap f (Verification k) = Verification $ \param -> k (f param)
-
--- | Pairs a refutation with a function which checks whether that refutation has
--- been shown. To keep consistent with other testing library metaphors, a value
--- of True means it has not been refuted (the test passes).
-data Expectation refutation dynamic result static where
-  Expectation :: Refutation refutation -> Verification dynamic result static -> Expectation refutation dynamic result static
-
-instance Contravariant (Expectation refutation dynamic result) where
-  -- The source location of the original definition doesn't change after a
-  -- contramap.
-  contramap f (Expectation r v) = Expectation r (contramap f v)
-
--- | Indicates that some type acts as a refutation of an assertion. This will
--- often be Text with a human-readable explanation.
-data Refutation refutation = Refutation
-  { refutationLocation :: MaybeSrcLoc
-  , refutationLabel :: refutation
-  }
-
-deriving instance Show refutation => Show (Refutation refutation)
-
-type Expectations refutation dynamic result = Conjunction (Expectation refutation dynamic result)
+type Expectations assertion specimen result = Conjunction (Expectation assertion specimen result)
 
 -- | A non-empty list but as an arbitrary tree so that it's easier to write.
---
--- FIXME generalize this so it can be used to contain any contravariant functor.
--- Will be used for composite IO tests as well, holding properties at each spot.
-data Conjunction f t where
-  And :: Conjunction f t -> Conjunction f t -> Conjunction f t
-  Assert :: f t -> Conjunction f t
+data Conjunction s where
+  And :: Conjunction s -> Conjunction s -> Conjunction s
+  Assert :: s -> Conjunction s
 
-instance Contravariant f => Contravariant (Conjunction f) where
-  contramap f (And l r) = And (contramap f l) (contramap f r)
-  contramap f (Assert e) = Assert (contramap f e)
+instance Functor Conjunction where
+  fmap f (And l r) = And (fmap f l) (fmap f r)
+  fmap f (Assert s) = Assert (f s)
 
-instance Semigroup (Conjunction f t) where
+instance Semigroup (Conjunction s) where
   (<>) = (.&)
 
-(.&) :: Conjunction f t -> Conjunction f t -> Conjunction f t
+(.&) :: Conjunction s -> Conjunction s -> Conjunction s
 (.&) = And
 
 infixr 1 .&
 
-that :: HasCallStack => refutation -> (t -> dynamic -> result -> Bool) -> Conjunction (Expectation refutation dynamic result) t
-that r f = Assert (Expectation (Refutation (srcLocOf callStack) r) (Verification f))
+-- | Use this to define expectations so that you get a source location.
+that :: HasCallStack
+     => assertion
+     -> (specimen -> result -> Bool)
+     -> Conjunction (Expectation assertion specimen result)
+that r f = Assert (Expectation (Assertion (srcLocOf callStack) r) (Verification f))
 
 -- TODO could probably speed things up by rewriting Conjunction in CPS. In
--- practice, all of the conjunctions will be known statically and should be
+-- practice, all of the conjunctions will be known statically and could be
 -- inlined.
-runConjunction :: Semigroup s => (f t -> s) -> Conjunction f t -> s
-runConjunction k (Assert f) = k f
-runConjunction k (And l r) = runConjunction k l <> runConjunction k r
+runConjunction :: Semigroup s => (t -> s) -> Conjunction t -> s
+runConjunction f (Assert s) = f s
+runConjunction f (And l r) = runConjunction f l <> runConjunction f r
 
--- | A counterexample produced by a property test. It gives the random seed and
--- search space, and also the value that was produced by the generator at this
--- point (even though it can be reproduced). It also has the non-empty set of
--- refutations, corresponding to the expectations which failed at this point.
-data Counterexample space dynamic result refutation = Counterexample
-  -- May as well be strict in all fields since they've already been computed
-  -- or else we wouldn't have a counterexample.
-  { randomSeed :: !Seed
-  , searchPoint :: !space
-  , dynamicPart :: !dynamic
-  , resultPart :: !result
-  , refutations :: !(NonEmpty (Refutation refutation))
+data Assertion assertion = Assertion
+  { assertionLocation :: MaybeSrcLoc
+  , assertionLabel :: assertion
   }
 
--- TODO remove this show instace; give a library with pretty-printers.
-instance Show (Counterexample space dynamic result refutation) where
-  show = const "Counterexample"
+instance Show assertion => Show (Assertion assertion) where
+  show assertion = mconcat
+    [ show (assertionLabel assertion)
+    , " at "
+    , showMaybeSrcLoc (assertionLocation assertion)
+    ]
+
+-- | A subject and expectations.
+data Test assertion specimen result = Test
+  { subject :: Subject specimen result
+  , expectations :: Expectations assertion specimen result
+  }
+
+-- What's the other part? We would want to say that a Property is a Domain
+-- applied to a Test, as in search through this Domain for a counterexample to
+-- this Test.
+--
+-- With that guiding principle, what should be a domain?
+
+data Domain space t = Domain
+  { search :: Strategy space
+  , generate :: Gen space t
+  }

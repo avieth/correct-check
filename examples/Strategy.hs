@@ -5,38 +5,26 @@ module Strategy where
 
 import Data.Maybe (fromMaybe)
 import Composite
-import Property
+import Check
+import Pretty
 import Space.Ordered
 import Space.Random
 import Space.Search
 import Types
 
--- | The randomly-generated part of the test.
-data DynamicPart state space = DynamicPart
+data Point state space = Point
   { state :: !state
   , space :: !space
   , seed :: !Seed
   }
   deriving (Show)
 
-instance (Pretty state, Pretty space) => Pretty (DynamicPart state space) where
-  pretty dpart = vsep
-    [ fromString "State" <+> pretty (state dpart)
-    , fromString "Point" <+> pretty (space dpart)
-    , fromString "Seed " <+> prettySeedHex (seed dpart)
+instance (Pretty state, Pretty space) => Pretty (Point state space) where
+  pretty (Point state space seed) = vsep
+    [ fromString "State" <+> pretty state
+    , fromString "Point" <+> pretty space
+    , fromString "Seed " <+> prettySeedHex seed
     ]
-
-data StaticPart state space = StaticPart
-  { showStaticPart :: String -- ^ Just for a show instance
-  , searchStrategy :: Strategy state space
-  , partialOrder :: PartialOrder space
-  }
-
-instance Show (StaticPart state space) where
-  show = showStaticPart
-
-instance (Pretty state, Pretty space) => Pretty (StaticPart state space) where
-  pretty = fromString . showStaticPart
 
 data Increases = Increases
   deriving (Show)
@@ -59,66 +47,73 @@ instance Pretty t => Pretty (Optional t) where
 
 -- | A family of tests for any partial order and strategy of agreeing types (the
 -- static part).
-test_complication :: Test (DynamicPart state space) (Optional space) Increases (StaticPart state space)
-test_complication = Test
-  { subject = Subject $ \spart dpart -> Optional $
-      fmap snd (complicate (searchStrategy spart) (seed dpart) (state dpart) (space dpart))
+--
+-- FIXME would be better to give a result type that includes the partial order
+-- computation. It should be computed as part of the subject, and the verification
+-- should be a simple pattern match.
+testComplication :: PartialOrder space
+                 -> SearchDef state space
+                 -> Test Increases (Point state space) (Optional space)
+testComplication pord searchDef = Test
+  { subject = Subject $ \(Point state space seed) -> Optional $
+      fmap snd (complicate searchDef seed state space)
   , expectations =
-      that Increases $ \spart dpart (Optional result) -> False &&
+      that Increases $ \(Point state space seed) (Optional result) ->
         -- The test passes vacuously if the result is Nothing (there was no
         -- more complex thing chosen).
         --
         -- flip it because, like 'compare', 'isGreaterThan pord' says whether
         -- the first argument is greater than the second. Also, since this is
         -- a partial order, we can't change it to isLessThan.
-        fromMaybe True (fmap (flip (isGreaterThan (partialOrder spart)) (space dpart)) result)
+        fromMaybe True (fmap (flip (isGreaterThan pord) space) result)
   }
 
-test_simplification :: Test (DynamicPart state space) [space] Decreases (StaticPart state space)
-test_simplification = Test
-  { subject = Subject $ \spart dpart ->
-      fmap snd (simplify (searchStrategy spart) (seed dpart) (state dpart) (space dpart))
-  , expectations = that Decreases $ \spart dpart result -> False &&
-      all (flip (isLessThan (partialOrder spart)) (space dpart)) result
+testSimplification :: PartialOrder space
+                   -> SearchDef state space
+                   -> Test Decreases (Point state space) [space]
+testSimplification pord searchDef = Test
+  { subject = Subject $ \(Point state space seed) ->
+      fmap snd (simplify searchDef seed state space)
+  , expectations = that Decreases $ \(Point sstate space seed) result -> 
+      all (flip (isLessThan pord) space) result
   }
 
--- To make properties, we'll need a domain.
--- Since we're testing search strategies, it only makes sense to use the strategy
--- that is so obvious it need not be tested.
-
-bigDomain :: Domain () () (DynamicPart () Natural)
-bigDomain = domain trivialSearch generate
-  where
-    generate = do
-      (state, space) <- gen
+-- A domain used to test complication/simplification? Only the trivial strategy
+-- could be appropriate, since it is too obvious to test.
+domain :: Domain () (Point () Natural)
+domain = Domain
+  { search = trivialStrategy
+  , generate = do
+      (state, space) <- (,) () <$> genNatural 0 upperBound
       seed <- genSeed
-      pure $ DynamicPart
+      pure $ Point
         { state = state
         , space = space
         , seed = seed
         }
+  }
+    where
     gen :: Arbitrary ((), Natural)
     gen = (,) () <$> genNatural 0 (2^32)
 
 localConfig :: LocalConfig
 localConfig = defaultLocalConfig
-  { localParallelism = noParallelism -- nCapabilities
+  { localParallelism = nCapabilities
   , localRandomSamples = 1024 * 4096
   }
+
+linear = linearSearchDef 1 0 upperBound
+
+upperBound :: Natural
+upperBound = fromIntegral (maxBound :: Int)
 
 main :: IO ()
 main = do
   result <- composite defaultGlobalConfig $
-    declare viaPrettyRenderer "Linear search complication"   test_complication   $ \complication ->
-    declare viaPrettyRenderer "Linear search simplification" test_simplification $ \simplification ->
+    declare renderTestViaPretty "Linear search complication"   (testComplication   ordPartialOrder linear) $ \complication ->
+    declare renderTestViaPretty "Linear search simplification" (testSimplification ordPartialOrder linear) $ \simplification ->
     compose $ do
-      check (serially 99)
-        complication
-        bigDomain
-        (StaticPart "Linear(1,0,99)" (linearSearchStrategy 1 0 99) ordPartialOrder)
-      check (serially 99)
-        simplification
-        bigDomain
-        (StaticPart "Linear(1,0,99)" (linearSearchStrategy 1 0 99) ordPartialOrder)
+      check (inParallel 4096) renderDomainViaPretty complication domain
+      check (inParallel 4096) renderDomainViaPretty simplification domain
       pure ()
   printTestResult result
