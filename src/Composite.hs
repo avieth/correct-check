@@ -51,7 +51,8 @@ module Composite
   ) where
 
 import Control.Concurrent.STM hiding (check)
-import Control.Exception (SomeException, Exception, evaluate, throwIO, try)
+import Control.Exception (SomeException (..), Exception, evaluate, throw, throwIO, try)
+import qualified Control.Exception as Exception
 import Control.Monad (ap, unless)
 import qualified Control.Monad.IO.Class as Lift
 import qualified Control.Monad.IO.Unlift as Unlift
@@ -112,7 +113,8 @@ data FailingCase where
               -- ^ Of the check
               -> RenderTest specimen result assertion
               -> RenderDomain space
-              -> Counterexample space specimen result assertion
+              -> Either SomeException (Counterexample space specimen result assertion)
+              -- ^ Even though the test is pure, it could still be partial.
               -> FailingCase
 
 -- | Include a test counterexample in the state.
@@ -122,7 +124,7 @@ addCounterexample :: String -- ^ Name of declaration
                   -> RenderTest specimen result assertion
                   -> RenderDomain space
                   -> TVar CheckState
-                  -> Counterexample space specimen result assertion
+                  -> Either SomeException (Counterexample space specimen result assertion)
                   -> STM ()
 addCounterexample name declSrcLoc checkSrcLoc renderTest renderDomain tvar !cx = do
   st <- readTVar tvar
@@ -139,10 +141,15 @@ addPropertyTestResult :: String -- ^ Name of declaration
                       -> RenderTest specimen result assertion
                       -> RenderDomain space
                       -> TVar CheckState
-                      -> Maybe (Counterexample space specimen result assertion)
+                      -> Either SomeException (Maybe (Counterexample space specimen result assertion))
                       -> STM ()
 addPropertyTestResult name declSrcLoc checkSrcLoc renderTest renderDomain tvar =
-  maybe (pure ()) (addCounterexample name declSrcLoc checkSrcLoc renderTest renderDomain tvar)
+  maybe (pure ()) (addCounterexample name declSrcLoc checkSrcLoc renderTest renderDomain tvar) . commute
+
+commute :: Either a (Maybe b) -> Maybe (Either a b)
+commute (Left err) = Just (Left err)
+commute (Right Nothing) = Nothing
+commute (Right (Just t)) = Just (Right t)
 
 -- | Well get this as the result of a composite test run.
 --
@@ -201,7 +208,7 @@ ppFailingCases :: NonEmpty FailingCase -> Doc AnsiStyle
 ppFailingCases = mconcat . intersperse PP.line . fmap ppFailingCase . toList
 
 ppFailingCase :: FailingCase -> Doc AnsiStyle
-ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderTest renderDomain cexample) = PP.vcat
+ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderTest renderDomain exceptionOrCounterexample) = PP.vcat
   [ PP.annotate PP.Ansi.bold (PP.annotate (PP.Ansi.color PP.Ansi.Red) (fromString "✘" PP.<+> fromString name))
   , PP.indent 2 $ PP.vsep
     [ PP.hsep
@@ -212,35 +219,38 @@ ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderTest renderDomain c
         [ boldString "Checked at   "
         , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc checkSrcLoc)
         ]
-    {-
-    -- TODO decide how to show a domain, if at all.
-    , PP.hsep
-        [ boldString "Over domain  "
-        , PP.annotate (PP.Ansi.color PP.Ansi.Cyan) (prettyMaybeSrcLoc (domainSrcLoc dom))
-        ]
-    -}
-    , PP.indent 14 $ PP.vsep
-        [ PP.hang 2 $ PP.hsep
-          [ fromString "with random seed"
-          , PP.annotate (PP.Ansi.color PP.Ansi.Green) (fromString (showSeedHex (randomSeed cexample)))
-          ]
-        , PP.hang 2 $ PP.hsep
-          [ fromString "and search part "
-          , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Yellow) (ppMaybe (renderSpace renderDomain) (searchPoint cexample))
-          ]
-        ]
-    , PP.hsep
-        [ boldString "Specimen     "
-        , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Green) (ppMaybe (renderSpecimen renderTest) (generatedValue cexample))
-        ]
-    , PP.hsep
-        [ boldString "Result       "
-        , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Blue) (ppMaybe (renderResult renderTest) (testResult cexample))
-        ]
-    , boldString "Refuting " PP.<+> PP.indent 4 (ppAssertions renderTest (refutations cexample))
+    , either ppExceptionalFailure ppCounterexample exceptionOrCounterexample
     ]
   ]
-  where boldString = PP.annotate PP.Ansi.bold . fromString
+  where
+    ppCounterexample cexample = PP.vsep
+      [ PP.indent 14 $ PP.vsep
+          [ PP.hang 2 $ PP.hsep
+            [ fromString "with random seed"
+            , PP.annotate (PP.Ansi.color PP.Ansi.Green) (fromString (showSeedHex (randomSeed cexample)))
+            ]
+          , PP.hang 2 $ PP.hsep
+            [ fromString "and search part "
+            , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Yellow) (ppMaybe (renderSpace renderDomain) (searchPoint cexample))
+            ]
+          ]
+      , PP.hsep
+          [ boldString "Specimen     "
+          , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Green) (ppMaybe (renderSpecimen renderTest) (generatedValue cexample))
+          ]
+      , PP.hsep
+          [ boldString "Result       "
+          , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Blue) (ppMaybe (renderResult renderTest) (testResult cexample))
+          ]
+      , boldString "Refuting " PP.<+> PP.indent 4 (ppAssertions renderTest (refutations cexample))
+      ]
+    ppExceptionalFailure (SomeException ex) = PP.vsep
+      [ PP.hsep
+          [ boldString "Exception    "
+          , PP.nest 2 $ PP.annotate (PP.Ansi.color PP.Ansi.Red) (PP.viaShow ex)
+          ]
+      ]
+    boldString = PP.annotate PP.Ansi.bold . fromString
 
 ppAssertions :: RenderTest specimen result assertion
              -> NonEmpty (Assertion assertion)
@@ -369,8 +379,8 @@ check :: HasCallStack
       -> check specimen
       -> Domain space specimen
       -> Composite check Bool
-check lconf render prop domain = Composite $ \k ->
-  k (srcLocOf callStack) lconf render prop domain >>= evaluate
+check lconf render check domain = Composite $ \k ->
+  k (srcLocOf callStack) lconf render check domain
 
 -- | 'check' but stops the test if it's a failure.
 {-# INLINE assert #-}
@@ -442,8 +452,12 @@ checkOne name declSrcLoc test renderTest env gconf checkSrcLoc tvar lconf render
       result = case mp of
         Nothing -> checkSequential (randomPoints (n - 1) seed) domain test
         Just m -> checkParallel m (randomPoints (n - 1) seed) domain test
-  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderTest renderDomain tvar result)
-  pure $! isNothing result
+  -- The test is pure, but it can still throw an exception (partial match,
+  -- error call, etc.).
+  outcome <- try (evaluate result)
+  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderTest renderDomain tvar outcome)
+  -- Exceptions are considered test failures.
+  pure $! isNothing (commute outcome)
 
 -- | Run a composite. Note the ST-style trick: only composites which do not
 -- know anythig about the `property` type may be run.
