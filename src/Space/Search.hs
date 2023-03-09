@@ -34,10 +34,10 @@ import GHC.Base (build)
 
 -- | Obvious definition is
 --
---   data Strategy space where
---     Strategy :: SearchDef state space -> state -> space -> Strategy space
+-- > data Strategy space where
+-- >   Strategy :: SearchDef state space -> state -> space -> Strategy space
 --
--- but will it prohibit good inlining and simplification? I don't know, but
+-- but would that prohibit good inlining and simplification? I don't know, but
 -- this one probably will inline better.
 newtype Strategy space = Strategy
   { runStrategy :: forall r . (forall state. SearchDef state space -> state -> space -> r) -> r }

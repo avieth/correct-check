@@ -4,9 +4,6 @@ module Check
   , checkSequentialAll
   , checkParallel
   , checkParallelAll
-
-  -- * Low-level
-  , searchPredicate
   ) where
 
 import Data.List.NonEmpty (NonEmpty, nonEmpty)

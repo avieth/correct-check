@@ -1,5 +1,18 @@
 module Pretty
-  ( PP.Pretty (..)
+  ( -- * Rendering Tests
+    RenderTest (..)
+  , noRenderTest
+  , renderTestViaShow
+  , renderTestViaPretty
+
+    -- * Rendering Domains
+  , RenderDomain (..)
+  , noRenderDomain
+  , renderDomainViaShow
+  , renderDomainViaPretty
+
+    -- * Re-exports
+  , PP.Pretty (..)
   , fromString
   , PP.vsep
   , PP.hsep
@@ -10,15 +23,6 @@ module Pretty
   , renderShowS
   , layoutPretty
   , defaultLayoutOptions
-
-  , RenderTest (..)
-  , noRenderTest
-  , renderTestViaShow
-  , renderTestViaPretty
-  , RenderDomain (..)
-  , noRenderDomain
-  , renderDomainViaShow
-  , renderDomainViaPretty
   ) where
 
 import Data.String (fromString)

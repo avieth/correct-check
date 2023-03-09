@@ -74,14 +74,17 @@ instance Eq Seed where
 instance Pretty Seed where
   pretty = prettySeedHex
 
--- | `Seed -> space -> (Seed, t)` but in CPS.
+-- | For monadic construction of pseudorandom values which also depend upon some
+-- parameter space. CPS form of
+--
+-- > Seed -> space -> (Seed, t)
+--
+-- for (hopefully) better inlining.
 --
 -- The monad instance splits the seed, so that, for instance, in
 --
--- @
---   replicateM n someGenerator
---   otherGenerator
--- @
+-- > replicateM n someGenerator
+-- > otherGenerator
 --
 -- otherGenerator is always run with the same seed, regardless of the value of n.
 newtype Gen space t = Gen { unGen :: forall r. SMGen -> space -> (SMGen -> t -> r) -> r }
@@ -135,15 +138,14 @@ splitK = flip split
 splitTuple :: Seed -> (Seed, Seed)
 splitTuple smgen = split smgen (,)
 
--- | Takes the first n seeds from the infinite list of splitUnfold.
+-- | This is @splitUnfoldN n g@ but `g` is the head of the non-empty list.
 --
--- The head of the list is the given seed, thus the resulting list is of length
--- n+1.
+-- The resulting list is of length @n+1@.
 --
 -- Useful in conjunction with rewrite rules in 'Space.Search'. Applying this to
--- 'searchSequential', for instance, is recommended, because GHC can inline the
--- cons and drastically simplify tests which do not actually depend upon the
--- random seed.
+-- 'Space.Search.searchSequential', for instance, is recommended, because GHC
+-- can inline the cons and drastically simplify tests which do not actually
+-- depend upon the random seed.
 {-# INLINE splitN #-}
 splitN :: Word32 -> Seed -> NonEmpty Seed
 splitN n g = g NE.:| splitUnfoldN n g
@@ -161,18 +163,19 @@ splitUnfoldN n (Seed g) = unfoldr
   (n, g)
 
 -- | A list of seeds and its length, which can be useful to know.
+--
 -- This should always be
 --
---   count = n
---   points = splitN n g
+-- > count = n
+-- > points = splitN n g
 --
--- for some seed g.
+-- for some seed `g`.
 data RandomPoints = RandomPoints
   { count :: Int -- Number of points.
   , points :: NonEmpty Seed
   }
 
--- | Givs n + 1 seeds drived from splitting this seed (see 'splitN').
+-- | Givs `n + 1` seeds drived from splitting this seed (see 'splitN').
 {-# INLINE CONLIKE randomPoints #-}
 randomPoints :: Word32 -> Seed -> RandomPoints
 randomPoints n g = RandomPoints
@@ -247,26 +250,26 @@ ndmap f gen = Gen $ \smgen space k -> unGen gen smgen (nonDecreasing f space) k
 
 -- | The obvious way to define a list generator.
 --
--- How it shrinks is determined by how its arguments shrinks.
+-- How it shrinks is determined by how its arguments shrink.
 --
--- For example it could be used to define a list where the length will shrink
+-- For example, it could be used to define a list where the length will shrink
 -- independently of the elements
 --
 -- @
---   type Space
---   type SubSpace
---   _1 :: NonDecreasing Space Natural
---   _2 :: NonDecreasing Space SubSpace
+-- type Space
+-- type SubSpace
+-- _1 :: NonDecreasing Space Natural
+-- _2 :: NonDecreasing Space SubSpace
 --
---   list :: Gen SubSpace t -> Gen Space [t]
---   list subGen = listOf (fromParameter _1) (ndmap _2 subGen)
+-- list :: Gen SubSpace t -> Gen Space [t]
+-- list subGen = listOf (fromParameter _1) (ndmap _2 subGen)
 -- @
 --
 -- It could also define a list which shrinks in length and in its components
 --
 -- @
---   list :: Gen Natural t -> Gen Natural [t]
---   list subGen = listOf parameter subGen
+-- list :: Gen Natural t -> Gen Natural [t]
+-- list subGen = listOf parameter subGen
 -- @
 listOf :: Gen space Natural -> Gen space t -> Gen space [t]
 listOf genN genT = do
@@ -305,9 +308,9 @@ readSeedHex str = do
       [(w64, "")] -> Just w64
       _ -> Nothing
 
--- | Useful for programs which wish to take a Natural from the programmer, but
--- clamp it to a Word32 and fail early if it's too big. Avoids silly mistakes
--- like, e.g. writing 2 ^ 64 as a Word32 and getting 0.
+-- | Useful for programs which wish to take a 'Natural' from the programmer, but
+-- clamp it to a 'Word32' and fail early if it's too big. Avoids silly mistakes
+-- like, e.g. writing @2 ^ 64@ as a 'Word32' and getting @0@.
 clampToWord32 :: String -> Natural -> Word32
 clampToWord32 tag n = m
   where

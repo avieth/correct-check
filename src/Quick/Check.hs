@@ -9,6 +9,7 @@ module Quick.Check
 import Data.Functor ((<&>))
 import Data.Foldable (toList)
 import Check
+import Numeric.Natural (Natural)
 import Space.Random
 import Types
 

@@ -1,24 +1,30 @@
 -- |
--- =
 --
--- HUnit style unit testing definitions can be expressed in property test style,
--- and this shows that they are a kind of "degenerate" case, because reproducing
--- a unit test failure is always trivial: you just give False or check equality
--- of two values that are known to not be equal.
+-- Unit testing definitions can be expressed in property test style, and this
+-- shows that they are a kind of "degenerate" case, because reproducing a unit
+-- test failure is always trivial: you just give False or check equality of two
+-- values that are known to not be equal.
+
+{-# LANGUAGE StaticPointers #-}
 
 module Unit
-  ( unitTest
+  ( -- * Unit Test and Domain
+    unitTest
   , unitDomain
   , withUnitTest
+  , Assertion (..)
+  , Result (..)
+
+    -- * hunit style assertions
   , assertFailure
   , assertTrue
   , assertEqual
   , (===)
+
+    -- * hspec-expectations style assertions
   , shouldReturn
   , shouldNotReturn
   , shouldThrow
-  , Assertion (..)
-  , Result (..)
   ) where
 
 import Control.Exception (Exception, try)
@@ -74,7 +80,7 @@ assertEqual = AssertEqual
 (===) = assertEqual ""
 
 -- | A unit test is trivial: the test is already done before it is given to the
--- test subject, its result compressed into a Bool and possibly a String
+-- test subject, its result compressed into a `Bool` and possibly a `String`
 -- explanation. Reproducing such a test is not very enlightening.
 unitTest :: Test UnitTest Assertion Result
 unitTest = Test
@@ -87,23 +93,24 @@ unitTest = Test
       AssertionPassed -> True
   }
 
--- | There's only one sensible domain for a unit test.
+-- | There's only one sensible domain for a unit test: no randomness and no
+-- searching.
 unitDomain :: Assertion -> Domain () Assertion
 unitDomain assertion = Domain
   { search = trivialStrategy
   , generate = pure assertion
   }
 
--- | Declares unit test and gives a canonical way to run it: unit test domain
--- with 1 particular sample.
+-- | Declares unit test and gives a canonical way to run it: use the
+-- 'unitDomain' and only one random seed.
 --
--- This is really just for demonstration of the ideas, it wouldn't make for a
--- useful test.
+-- Although this may be useful in practice, it probably will not lead to a
+-- reproducible test.
 {-# INLINE withUnitTest #-}
 withUnitTest :: HasCallStack
              => ((HasCallStack => Assertion -> Composite check Bool) -> Declaration check)
              -> Declaration check
-withUnitTest k = withFrozenCallStack (declare renderTestViaPretty "Unit" unitTest $ \runHUnit ->
+withUnitTest k = withFrozenCallStack (declare renderTestViaPretty "Unit" (static unitTest) $ \runHUnit ->
   -- Freeze the call stack in the continuation as well, so that check will use
   -- the one from k, which will stand in as the `check` function inside the
   -- composite.

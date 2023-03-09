@@ -1,12 +1,14 @@
 module Location
-  ( HasCallStack
-  , CallStack
-  , SrcLoc
-  , MaybeSrcLoc (..)
+  ( -- * Optional source location
+    MaybeSrcLoc (..)
   , srcLocOf
-  , callStack
   , showMaybeSrcLoc
   , prettyMaybeSrcLoc
+    -- * Re-exports
+  , HasCallStack
+  , CallStack
+  , SrcLoc
+  , callStack
   , prettySrcLoc
   , withFrozenCallStack
   ) where
