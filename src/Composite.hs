@@ -27,8 +27,10 @@ module Composite
   , effect
   , effect_
   , check
-  , assert
+  , checkAsync
+  , awaitCheck
   , stop
+  , stopBecause
   , StopTestEarly (..)
 
     -- * Showing results
@@ -42,6 +44,7 @@ module Composite
   , inParallel
   , GlobalConfig (..)
   , defaultGlobalConfig
+  , asynchronousChecks
   , Parallelism (..)
   , noParallelism
   , nCapabilities
@@ -50,10 +53,12 @@ module Composite
   , Natural
   ) where
 
+import Control.Concurrent.Async as Async
 import Control.Concurrent.STM hiding (check)
-import Control.Exception (SomeException (..), Exception, evaluate, throw, throwIO, try)
+import Control.Concurrent.STM.TSem
+import Control.Exception (SomeException (..), Exception, evaluate, throwIO, try)
 import qualified Control.Exception as Exception
-import Control.Monad (ap, unless)
+import Control.Monad (ap)
 import qualified Control.Monad.IO.Class as Lift
 import qualified Control.Monad.IO.Unlift as Unlift
 import Check
@@ -63,8 +68,7 @@ import Pretty
 import Types
 import Space.Random as Random
 import Data.Foldable (toList)
-import Data.List (intersperse)
-import Data.List.NonEmpty as NE (NonEmpty, nonEmpty)
+import Data.List.NonEmpty as NE (NonEmpty)
 import Data.Word (Word32)
 import Data.Maybe (isNothing)
 import Data.Sequence (Seq)
@@ -86,6 +90,8 @@ import qualified Prettyprinter.Render.Terminal as PP.Ansi
 -- in general to be reproducible, since it's IO.
 data CheckState = CheckState
   { checkStateSeed :: !Seed
+  , checkStateTotalChecks :: !Natural
+  -- ^ How many checks were made.
   , checkStateFailingTests :: !(Seq FailingCase)
   }
 
@@ -93,8 +99,12 @@ data CheckState = CheckState
 initialCheckStateIO :: Seed -> IO (TVar CheckState)
 initialCheckStateIO seed = newTVarIO $ CheckState
   { checkStateSeed = seed
+  , checkStateTotalChecks = 0
   , checkStateFailingTests = mempty
   }
+
+incrementCheckCount :: CheckState -> CheckState
+incrementCheckCount cs = cs { checkStateTotalChecks = checkStateTotalChecks cs + 1 }
 
 -- | Split the seed, update it with one half, and return the other half.
 splitStateSeed :: TVar CheckState -> STM Seed
@@ -189,23 +199,30 @@ ppExceptionalFooter ex =
   $ [fromString "Ended with exception:", PP.viaShow ex ]
 
 ppSummary :: Seed -> CheckState -> Doc AnsiStyle
-ppSummary initialSeed st = PP.annotate PP.Ansi.bold (PP.hsep
-  [ fromString "There"
-  , fromString verb
-  , PP.viaShow (Seq.length (checkStateFailingTests st))
-  , fromString noun
-  , fromString "discovered from initial random seed"
-  , PP.annotate (PP.Ansi.color PP.Ansi.Green) (fromString (showSeedHex initialSeed))
-  ]) <> failingSummary
+ppSummary initialSeed st = PP.vsep $
+  [ PP.annotate PP.Ansi.bold $ PP.hsep
+      [ fromString "There"
+      , fromString verb
+      , PP.viaShow (Seq.length (checkStateFailingTests st))
+      , fromString noun
+      , fromString "discovered from initial random seed"
+      , PP.annotate (PP.Ansi.color PP.Ansi.Green) (fromString (showSeedHex initialSeed))
+      ]
+  ] ++ failingSummary ++ [
+    PP.annotate PP.Ansi.bold $ PP.hsep
+      [ fromString "A total of"
+      , fromString (show (checkStateTotalChecks st))
+      , fromString nounTests
+      , fromString verbTests
+      , fromString "made"
+      ]
+  ]
   where
     n = Seq.length (checkStateFailingTests st)
     (verb, noun) = if n == 1 then ("was", "counterexample") else ("were", "counterexamples")
-    failingSummary = case NE.nonEmpty (toList (checkStateFailingTests st)) of
-      Nothing -> mempty
-      Just neFailingCases -> PP.line <> ppFailingCases neFailingCases
+    (verbTests, nounTests) = if checkStateTotalChecks st == 1 then ("was", "check") else ("were", "checks")
 
-ppFailingCases :: NonEmpty FailingCase -> Doc AnsiStyle
-ppFailingCases = mconcat . intersperse PP.line . fmap ppFailingCase . toList
+    failingSummary = ppFailingCase <$> toList (checkStateFailingTests st)
 
 ppFailingCase :: FailingCase -> Doc AnsiStyle
 ppFailingCase (FailingCase name declSrcLoc checkSrcLoc renderTest renderDomain exceptionOrCounterexample) = PP.vcat
@@ -289,7 +306,8 @@ ppMaybe mPp t = case mPp of
 -- universally quantified during construction.
 newtype Composite check t = Composite
   { runComposite ::
-         (forall space specimen .
+         AsyncCheckEnv
+      -> (forall space specimen .
               MaybeSrcLoc -- Of the call site to this check in the composite
            -> LocalConfig
            -> RenderDomain space
@@ -301,26 +319,26 @@ newtype Composite check t = Composite
   }
 
 instance Functor (Composite property) where
-  fmap f (Composite k) = Composite (\l -> fmap f (k l))
+  fmap f (Composite k) = Composite (\mq l -> fmap f (k mq l))
 
 instance Applicative (Composite property) where
-  pure x = Composite (\_ -> pure x)
+  pure x = Composite (\_ _ -> pure x)
   (<*>) = ap
 
 instance Monad (Composite property) where
   return = pure
-  Composite left >>= k = Composite (\l -> left l >>= runCompositeAt l . k)
+  Composite left >>= k = Composite (\mq l -> left mq l >>= runCompositeAt mq l . k)
 
 -- MonadIO and MonadUnliftIO are given, to make it easier to write composites:
 -- there's already a wide variety of "lifted" variants of things out there.
 
 instance Lift.MonadIO (Composite property) where
   {-# INLINE liftIO #-}
-  liftIO io = Composite $ \_ -> io
+  liftIO io = Composite $ \_ _ -> io
 
 instance Unlift.MonadUnliftIO (Composite property) where
   {-# INLINE withRunInIO #-}
-  withRunInIO k = Composite $ \l -> k (runCompositeAt l)
+  withRunInIO k = Composite $ \mq l -> k (runCompositeAt mq l)
 
 {-# INLINE effect #-}
 effect :: ((forall r . Composite property r -> IO r) -> IO t) -> Composite property t
@@ -333,7 +351,8 @@ effect_ = Lift.liftIO
 -- | Flipped 'runComposite'.
 {-# INLINE runCompositeAt #-}
 runCompositeAt ::
-     (forall space specimen .
+     AsyncCheckEnv
+  -> (forall space specimen .
           MaybeSrcLoc
        -> LocalConfig
        -> RenderDomain space
@@ -343,7 +362,7 @@ runCompositeAt ::
      )
   -> Composite check t
   -> IO t
-runCompositeAt k comp = runComposite comp k
+runCompositeAt mq k comp = runComposite comp mq k
 
 -- | The `check` parameter of 'Composite' will be instantiated to this in
 -- order to run a composite test.
@@ -355,20 +374,27 @@ runCompositeAt k comp = runComposite comp k
 -- where it was declared).
 newtype Check specimen = Check
   { runCheck :: forall space .
-                Env
-             -> GlobalConfig
-             -> MaybeSrcLoc
+                MaybeSrcLoc
              -> TVar CheckState
-             -> LocalConfig
+             -> ResolvedConfig
              -> RenderDomain space
              -> Domain space specimen
              -> IO Bool
   }
 
 {-# INLINE runCompositeCheck #-}
-runCompositeCheck :: Env -> GlobalConfig -> TVar CheckState -> Composite Check t -> IO t
-runCompositeCheck env gconf tvar (Composite k) =
-  k (\srcLoc lconf renderDomain (Check f) -> f env gconf srcLoc tvar lconf renderDomain)
+runCompositeCheck :: Env
+                  -> GlobalConfig
+                  -> AsyncCheckEnv
+                  -> TVar CheckState
+                  -> Composite Check t
+                  -> IO t
+runCompositeCheck env gconf asyncEnv tvar (Composite k) =
+  k asyncEnv (\srcLoc lconf renderDomain (Check f) ->
+    -- Force the config here, in case it has a value that won't fit in Word32.
+    -- In this case we want the composite to fail early.
+    let !resolvedConfig = resolveConfig (showMaybeSrcLoc srcLoc) env gconf lconf
+     in f srcLoc tvar resolvedConfig renderDomain)
 
 -- | This will check a property within a composite. It will force the evaluation
 -- of the property up to the determination of whether it passes or not.
@@ -379,22 +405,8 @@ check :: HasCallStack
       -> check specimen
       -> Domain space specimen
       -> Composite check Bool
-check lconf render check domain = Composite $ \k ->
+check lconf render check domain = Composite $ \_ k ->
   k (srcLocOf callStack) lconf render check domain
-
--- | 'check' but stops the test if it's a failure.
-{-# INLINE assert #-}
-assert :: HasCallStack
-       => LocalConfig
-      -> RenderDomain space
-       -> check specimen
-       -> Domain space specimen
-       -> Composite check ()
-assert lconf render prop domain = withFrozenCallStack (do
-  b <- check lconf render prop domain
-  -- FIXME would be better to give an exception that shows it was an
-  -- assertion that caused the early exit?
-  unless b (stopWithExplanation "assertion failed"))
 
 -- | Used to restrict the form of composite tests. The function 'composite'
 -- will eliminate this constructor, but requires that the type parameter
@@ -425,8 +437,8 @@ declare :: HasCallStack
         -> StaticPtr (Test assertion specimen result)
         -> (check specimen -> Declaration check)
         -> Declaration check
-declare renderTest name test k = Declaration $ \toCheck ->
-  runDeclaration (k (toCheck (Check (checkOne name (srcLocOf callStack) (deRefStaticPtr test) renderTest)))) toCheck
+declare renderTest name test k = Declaration $ \toCheck -> runDeclaration
+  (k (toCheck (Check (checkOne name (srcLocOf callStack) (deRefStaticPtr test) renderTest)))) toCheck
 
 -- | Takes the source location of the declaration, and also of the call to
 -- check/assert.
@@ -435,27 +447,26 @@ checkOne :: String -- ^ Name of the declaration
          -> MaybeSrcLoc -- ^ Location of the declaration
          -> Test assertion specimen result
          -> RenderTest specimen result assertion
-         -> Env
-         -> GlobalConfig
          -> MaybeSrcLoc -- ^ Location of the call to check within the Composite
          -> TVar CheckState
-         -> LocalConfig
+         -> ResolvedConfig
          -> RenderDomain space
          -> Domain space specimen
          -> IO Bool
-checkOne name declSrcLoc test renderTest env gconf checkSrcLoc tvar lconf renderDomain domain = do
+checkOne name declSrcLoc test renderTest checkSrcLoc tvar rconf renderDomain domain = do
   seed <- atomically (splitStateSeed tvar)
-  -- FIXME if the config asks for 0 random samples, we should quit. Just like
-  -- the quickCheck driver.
-  let n = max 1 (clampToWord32 (showMaybeSrcLoc declSrcLoc) (nsamples gconf lconf))
-      mp = fmap (clampToWord32 (showMaybeSrcLoc declSrcLoc)) (parallelism env gconf lconf)
-      result = case mp of
-        Nothing -> checkSequential (randomPoints (n - 1) seed) domain test
-        Just m -> checkParallel m (randomPoints (n - 1) seed) domain test
+  -- ResolvedConfig should ensure n > 1.
+  let n = resolvedRandomSamples rconf
+      m = resolvedParallelism rconf
+      result = case m > 1 of
+        False -> checkSequential (randomPoints (n - 1) seed) domain test
+        True -> checkParallel m (randomPoints (n - 1) seed) domain test
   -- The test is pure, but it can still throw an exception (partial match,
   -- error call, etc.).
   outcome <- try (evaluate result)
-  atomically (addPropertyTestResult name declSrcLoc checkSrcLoc renderTest renderDomain tvar outcome)
+  atomically $ do
+    addPropertyTestResult name declSrcLoc checkSrcLoc renderTest renderDomain tvar outcome
+    modifyTVar' tvar incrementCheckCount
   -- Exceptions are considered test failures.
   pure $! isNothing (commute outcome)
 
@@ -467,7 +478,8 @@ composite gconf decl = do
   env <- mkEnv
   initialSeed <- Random.newSeedIO
   tvar <- initialCheckStateIO initialSeed
-  outcome <- try (runCompositeCheck env gconf tvar (runDeclaration decl id))
+  outcome <- withAsynchronousChecks (asynchronousCheckThreads gconf) $ \mq ->
+    try (runCompositeCheck env gconf mq tvar (runDeclaration decl id))
   finalState <- readTVarIO tvar
   pure $ case outcome of
     Left someException -> Exceptional initialSeed finalState someException
@@ -487,11 +499,11 @@ instance Exception StopTestEarly
 
 {-# INLINE stop #-}
 stop :: HasCallStack => Composite check x
-stop = Composite $ \_ -> throwIO (StopTestEarly "stop test" (srcLocOf callStack))
+stop = Composite $ \_ _ -> throwIO (StopTestEarly "stop test" (srcLocOf callStack))
 
-{-# INLINE stopWithExplanation #-}
-stopWithExplanation :: HasCallStack => String -> Composite check x
-stopWithExplanation str = Composite $ \_ -> throwIO (StopTestEarly str (srcLocOf callStack))
+{-# INLINE stopBecause #-}
+stopBecause :: HasCallStack => String -> Composite check x
+stopBecause str = Composite $ \_ _ -> throwIO (StopTestEarly str (srcLocOf callStack))
 
 data Env = Env
   { envCapabilities :: !Word32
@@ -506,15 +518,140 @@ mkEnv =  do
 
 -- | Configuration of a composite run overall.
 data GlobalConfig = GlobalConfig
-  { globalMaximumParallelism :: Maybe Parallelism
-  , globalMaximumRandomSamples :: Maybe Natural
+  { maximumParallelism :: Maybe Parallelism
+    -- ^ How much parallelism at most per check. If there are concurrent checks,
+    -- each can use this much parallelism concurrently.
+  , maximumRandomSamples :: Maybe Natural
+    -- ^ Maximum number of random samples per check.
+  , asynchronousCheckThreads :: Maybe Natural
+    -- ^ Configure whether to allow for asynchronous checking that won't block
+    -- the composite IO. This has a slight overhead: it will fork this many
+    -- threads to clear a TQueue.
   }
 
 defaultGlobalConfig :: GlobalConfig
 defaultGlobalConfig = GlobalConfig
-  { globalMaximumParallelism = Nothing
-  , globalMaximumRandomSamples = Nothing
+  { maximumParallelism = Nothing
+  , maximumRandomSamples = Nothing
+  , asynchronousCheckThreads = Nothing
   }
+
+asynchronousChecks :: Natural -> GlobalConfig -> GlobalConfig
+asynchronousChecks n gconf = gconf { asynchronousCheckThreads = Just n }
+
+data AsyncCheckEnv where
+  NoAsyncChecks :: AsyncCheckEnv
+  AsyncChecks :: TSem -> TQueue QueuedCheck -> AsyncCheckEnv
+
+-- | If there number of async check threads is configured to be a positive
+-- number, then a TQueue is created and that many threads are spawned to clear
+-- it and run the checks.
+--
+-- Those threads run forever with async exceptions masked.
+-- They will block on STM retry when the queue is empty. Since the checks are
+-- pure functions, they are not interruptible, but the STM retry is. So in case
+-- the queue is empty, the withAsync call be able to kill the thread.
+withAsynchronousChecks :: Maybe Natural
+                       -> (AsyncCheckEnv -> IO t)
+                       -> IO t
+withAsynchronousChecks conf k = case atLeastOne of
+   Nothing -> k NoAsyncChecks
+   -- We know it's greater than one so we're good to go.
+   Just n -> do
+     tsem <- atomically (newTSem 0)
+     tqueue <- newTQueueIO
+     -- Call with an unmask. Seems unlikely that this would be called in an
+     -- uninterruptible masking state, but I've seen enough to believe it could
+     -- happen. See comment on 'clearQueue'.
+     withAsyncWithUnmask (\unmask -> unmask (clearQueueN tsem tqueue n)) $ \_ ->
+       -- Problem here (I think) is that we haven't guaranteed that the thread
+       -- will start before the body terminates.
+       -- Good solution? Make checkAsync block until it knows the threads
+       -- are up.
+       k (AsyncChecks tsem tqueue)
+  where
+    atLeastOne :: Maybe Int
+    atLeastOne = do
+      n <- conf
+      if n > 0 then Just (fromIntegral n) else Nothing
+
+-- | It's @IO (STM ())@ because the outer @IO@ will evaluate the test and the
+-- inner will update some TMVar to communciate back to the composite main
+-- thread.
+newtype QueuedCheck = QueuedCheck { runQueuedCheck :: IO (STM ()) }
+
+-- | What is given in the composite by an asynchronous check.
+--
+-- The STM will block until the test is done and the result is known.
+newtype AsyncCheck check = AsyncCheck { asyncCheckVar :: STM Bool }
+
+{-# INLINE awaitCheck #-}
+awaitCheck :: AsyncCheck check -> Composite check Bool
+awaitCheck = effect_ . atomically . asyncCheckVar
+
+-- | Like 'check' but will do it in the background if the composite is
+-- configured with async checks enabled.
+--
+-- Unlike typical async, if you don't await it, it (should be) is still
+-- guaranteed to complete, and it will appear in the reslting check state.
+--
+-- To get that guarantee, this function will block until it knows that some
+-- thread is going to pick up its queued check without ever having to enter into
+-- an interruptible operation (i.e. an STM retry). That's done by way of an STM
+-- semaphore. This call will block if there are too many other async checks
+-- in progress (more than the amount of configured async check concurrency).
+-- This also ensures that the backing TQueue is bounded in length.
+{-# INLINE checkAsync #-}
+checkAsync :: HasCallStack
+           => LocalConfig
+           -> RenderDomain space
+           -> check specimen
+           -> Domain space specimen
+           -> Composite check (AsyncCheck check)
+checkAsync lconf renderDomain check domain = Composite $ \mqueue k -> case mqueue of
+  -- Wanted an async check, but no concurrency available. Check it here.
+  NoAsyncChecks -> do
+    b <- k (srcLocOf callStack) lconf renderDomain check domain
+    pure $ AsyncCheck (pure b)
+  -- Concurrency is available: throw the check into the queue, to fill the
+  -- TMVar when it finishes.
+  AsyncChecks tsem tqueue -> do
+    tmvar <- newEmptyTMVarIO
+    let qcheck = QueuedCheck $ do
+          -- It is assumed that the check runniner `k` will evaluate the result
+          -- and catch pure exceptions, so we don't need to do that here.
+          b <- k (srcLocOf callStack) lconf renderDomain check domain
+          pure (putTMVar tmvar b)
+    -- Enqueue the check, but then wait until some worker has signalled that
+    -- they're going to pick it up.
+    -- See 'clearQueue' where the opposite order happens.
+    atomically (writeTQueue tqueue qcheck)
+    atomically (waitTSem tsem)
+    pure $ AsyncCheck (readTMVar tmvar)
+
+-- | Runs checks from the queue.
+--
+-- Must not be called with exceptions _uninterruptibly_ masked.
+--
+-- The loop will run in this interruptible mask, and should be killed by a
+-- withAsync termination throwTo. It can only be interrupted when it `retry`s
+-- on an empty queue looking for more work. If the queue is empty, and the
+-- enclosing `withAsync` call ends, then we know the queue will forever be
+-- empty, so it's time to stop.
+clearQueue :: TSem -> TQueue QueuedCheck -> IO forever
+clearQueue tsem tqueue = Exception.mask_ loop
+  where
+    loop = do
+      -- Signal that we're ready and waiting for a queued check.
+      atomically (signalTSem tsem)
+      queuedCheck <- atomically (readTQueue tqueue)
+      finish <- runQueuedCheck queuedCheck
+      atomically finish
+      loop
+
+-- | Call with n > 0
+clearQueueN :: TSem -> TQueue QueuedCheck -> Int -> IO ()
+clearQueueN tsem tqueue n = replicateConcurrently_ n (clearQueue tsem tqueue)
 
 -- | Configuration for a particular property.
 data LocalConfig = LocalConfig
@@ -542,7 +679,7 @@ inParallel n = LocalConfig
   }
 
 nsamples :: GlobalConfig -> LocalConfig -> Natural
-nsamples gconf lconf = case globalMaximumRandomSamples gconf of
+nsamples gconf lconf = case maximumRandomSamples gconf of
   Nothing -> localRandomSamples lconf
   Just n -> min n (localRandomSamples lconf)
 
@@ -555,7 +692,7 @@ parallelismInEnv env prl = case prl of
 parallelism :: Env -> GlobalConfig -> LocalConfig -> Maybe Natural
 parallelism env gconf lconf = do
   requested <- parallelismInEnv env (localParallelism lconf)
-  Just $ case globalMaximumParallelism gconf >>= parallelismInEnv env of
+  Just $ case maximumParallelism gconf >>= parallelismInEnv env of
     Nothing -> requested
     Just limited -> min requested limited
 
@@ -570,3 +707,24 @@ noParallelism = NoParallelism
 
 nCapabilities :: Parallelism
 nCapabilities = DynamicParallelism id
+
+-- | Resolved from the 'Env', 'GlobalConfig' and a 'LocalConfig'.
+data ResolvedConfig = ResolvedConfig
+  { resolvedRandomSamples :: !Word32
+  -- ^ Always > 0
+  , resolvedParallelism :: !Word32
+  -- ^ Always > 0
+  }
+
+-- | The string is for an error message in case the resolution fails due to
+-- clamping.
+resolveConfig :: String -> Env -> GlobalConfig -> LocalConfig -> ResolvedConfig
+resolveConfig errMsg env gconf lconf = ResolvedConfig
+  { resolvedParallelism = m
+  , resolvedRandomSamples = n
+  }
+  where
+    !n = max 1 (clampToWord32 errMsg (nsamples gconf lconf))
+    !m = case parallelism env gconf lconf of
+           Nothing -> 1
+           Just m' -> max 1 (clampToWord32 errMsg m')
