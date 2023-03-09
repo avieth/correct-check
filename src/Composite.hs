@@ -78,6 +78,9 @@ import Prettyprinter (Doc)
 import qualified Prettyprinter as PP
 import Prettyprinter.Render.Terminal (AnsiStyle)
 import qualified Prettyprinter.Render.Terminal as PP.Ansi
+import qualified Prettyprinter.Render.Text as PP.Text
+import System.IO (Handle, stdout)
+import System.Console.ANSI (hSupportsANSIColor)
 
 -- | Will be held in a TVar for use in a composite property run.
 --
@@ -169,11 +172,14 @@ data TestResult where
   Exceptional :: Seed -> CheckState -> SomeException -> TestResult
 
 -- | To stdout.
-printDoc :: Doc AnsiStyle -> IO ()
-printDoc = PP.Ansi.putDoc
-
 printTestResult :: TestResult -> IO ()
-printTestResult = printDoc . ppTestResult
+printTestResult = hPrintTestResult stdout
+
+hPrintTestResult :: Handle -> TestResult -> IO ()
+hPrintTestResult h result = do
+  let doc = ppTestResult result
+  b <- hSupportsANSIColor h
+  if b then PP.Ansi.hPutDoc h doc else PP.Text.hPutDoc h doc
 
 ppTestResult :: TestResult -> Doc AnsiStyle
 ppTestResult tresult = case tresult of

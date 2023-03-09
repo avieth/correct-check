@@ -164,25 +164,17 @@ the tests checked within it _are_. The counterexamples appearing in the
 and actionable information to the investigating programmer.
 
 ```console
-Found counterexample from initial seed 4bf8701495feea3f587c7849b5540001
-Random seed:     4bf8701495feea3f587c7849b5540001
-Search point:    1
-Generated value: [3093350949]
-Test result:     [3093350949,3093350949]
-Refuted:         ["reverse . reverse = id" at examples/Basic.hs:47:20 in main:Basic]
-[0;1mThere was 1 counterexample discovered from initial random seed [0;92;1m7064e121eb9c936b87425b101b7e31c3[0;1m[0m
-[0;1m[0;91;1m✘ List reverse[0;1m[0m
-  [0;1mDeclared at  [0m [0;96mexamples/Basic.hs:73:5 in main:Basic[0m
-  [0;1mChecked at   [0m [0;96mexamples/Basic.hs:79:7 in main:Basic[0m
-                with random seed [0;92m7ee997422298f6f187425b101b7e31c3[0m
-                and search part  [0;93m1[0m
-  [0;1mSpecimen     [0m [0;92m[1535][0m
-  [0;1mResult       [0m [0;94m[1535, 1535][0m
-  [0;1mRefuting [0m     [0;91mreverse . reverse = id[0m at [0;96mexamples/Basic.hs:47:20 in main:Basic[0m
-[0;1mEnded normally[0m
-
-[0;1mThere were 0 counterexamples discovered from initial random seed [0;92;1m4872f7b59667bc3b09c3af4c305312b1[0;1m[0m
-[0;1mEnded normally[0m
+There was 1 counterexample discovered from initial random seed 9b23a7bf5c588103c2bf7553b6ce2217
+✘ List reverse
+  Declared at   examples/Basic.hs:74:5 in main:Basic
+  Checked at    examples/Basic.hs:80:17 in main:Basic
+                with random seed 20a29266c9f4c531c2bf7553b6ce2217
+                and search part  2
+  Specimen      [1562, 4]
+  Result        [1562, 4, 4, 1562]
+  Refuting      reverse . reverse = id at examples/Basic.hs:48:20 in main:Basic
+A total of 3 checks were made
+Ended normally
 ```
 
 Example output is from a deliberately wrong list reverse definition. See
