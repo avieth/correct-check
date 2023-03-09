@@ -1,3 +1,5 @@
+{-# LANGUAGE StaticPointers #-}
+
 module Basic where
 
 import Data.Word
@@ -20,6 +22,9 @@ roundtripTest equal there back = Test
       Just a' -> equal a a'
   }
 
+roundtripSeedHex :: StaticPtr (Test String Seed (String, Maybe Seed))
+roundtripSeedHex = static (roundtripTest (==) showSeedHex readSeedHex)
+
 listReverseTest :: Eq a => Test String [a] [a]
 listReverseTest = Test
   { subject = Subject $ \lst -> reverse lst
@@ -38,16 +43,13 @@ domainSeed = Domain
   , generate = genSeed
   }
 
-roundtripSeedHex :: Test String Seed (String, Maybe Seed)
-roundtripSeedHex = roundtripTest (==) showSeedHex readSeedHex
-
 main :: IO ()
 main = do
   quickCheckParallel 8 100 listReverseTest domainList >>= print
   -- GHC will simplify this and only run the test once, since it doesn't
   -- depend upon the random seed.
   quickCheck 100 unitTest (unitDomain ((42 :: Int) === 42)) >>= print
-  quickCheck 100 roundtripSeedHex domainSeed >>= print
+  quickCheck 100 (deRefStaticPtr roundtripSeedHex) domainSeed >>= print
   result <- composite defaultGlobalConfig $
     withUnitTest $ \unitTest ->
     -- Important to render via show, because the pretty instance is defined by

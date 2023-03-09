@@ -1,3 +1,5 @@
+{-# LANGUAGE StaticPointers #-}
+
 module Strategy where
 
 -- This example shows how we can property test search strategies, to check that
@@ -110,8 +112,8 @@ upperBound = fromIntegral (maxBound :: Int)
 main :: IO ()
 main = do
   result <- composite defaultGlobalConfig $
-    declare renderTestViaPretty "Linear search complication"   (testComplication   ordPartialOrder linear) $ \complication ->
-    declare renderTestViaPretty "Linear search simplification" (testSimplification ordPartialOrder linear) $ \simplification ->
+    declare renderTestViaPretty "Linear search complication"   (static (testComplication   ordPartialOrder linear)) $ \complication ->
+    declare renderTestViaPretty "Linear search simplification" (static (testSimplification ordPartialOrder linear)) $ \simplification ->
     compose $ do
       check (inParallel 4096) renderDomainViaPretty complication domain
       check (inParallel 4096) renderDomainViaPretty simplification domain

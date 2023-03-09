@@ -16,11 +16,13 @@
 -- useful without it.
 
 module Composite
-  ( Declaration
+  ( -- * Declaring tests
+    Declaration
   , composite
   , declare
   , compose
 
+    -- * Composing tests
   , Composite
   , effect
   , effect_
@@ -29,18 +31,23 @@ module Composite
   , stop
   , StopTestEarly (..)
 
+    -- * Showing results
   , TestResult (..)
   , printTestResult
 
+    -- * Configuration
   , LocalConfig (..)
+  , defaultLocalConfig
   , serially
   , inParallel
   , GlobalConfig (..)
+  , defaultGlobalConfig
   , Parallelism (..)
   , noParallelism
   , nCapabilities
-  , defaultGlobalConfig
-  , defaultLocalConfig
+
+    -- * Re-export
+  , Natural
   ) where
 
 import Control.Concurrent.STM hiding (check)
@@ -49,6 +56,7 @@ import Control.Monad (ap, unless)
 import qualified Control.Monad.IO.Class as Lift
 import qualified Control.Monad.IO.Unlift as Unlift
 import Check
+import Numeric.Natural (Natural)
 import Location
 import Pretty
 import Types
@@ -397,15 +405,18 @@ compose :: Composite check () -> Declaration check
 compose comp = Declaration (\_ -> comp)
 
 -- | Declare a property, to allow for its use in a composite.
+--
+-- The test must be inside a StaticPtr. That's key if we want reproducibility.
+-- This is the only place where it is enforced; it is `deRefStaticPtr`d here.
 {-# INLINE CONLIKE declare #-}
 declare :: HasCallStack
         => RenderTest specimen result assertion
         -> String
-        -> Test assertion specimen result
+        -> StaticPtr (Test assertion specimen result)
         -> (check specimen -> Declaration check)
         -> Declaration check
 declare renderTest name test k = Declaration $ \toCheck ->
-  runDeclaration (k (toCheck (Check (checkOne name (srcLocOf callStack) test renderTest)))) toCheck
+  runDeclaration (k (toCheck (Check (checkOne name (srcLocOf callStack) (deRefStaticPtr test) renderTest)))) toCheck
 
 -- | Takes the source location of the declaration, and also of the call to
 -- check/assert.

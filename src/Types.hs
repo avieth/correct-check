@@ -22,11 +22,16 @@ module Types
   -- * Re-export
   , Strategy (..)
   , Gen (..)
-  , Natural
+  -- ** Static pointers can be used to help ensure reproducibility
+  , StaticPtr
+  , Typeable
+  , deRefStaticPtr
   ) where
 
+import Data.Typeable (Typeable)
 import Numeric.Natural (Natural)
 import Location
+import GHC.StaticPtr
 import Space.Random as Random
 import Space.Search as Search
 
@@ -38,9 +43,15 @@ newtype Subject specimen result = Subject
 newtype Verification specimen result = Verification
   { runVerification :: specimen -> result -> Bool }
 
+-- | Defining feature of 'Subject' and 'Verification'.
+--
+-- > passes sub ver s = runVerification ver s (runSubject sub s)
 passes :: Subject specimen result -> Verification specimen result -> specimen -> Bool
 passes sub ver s = runVerification ver s (runSubject sub s)
 
+-- | Defining feature of 'Subject' and 'Verification'.
+--
+-- > fails sub ver = not . passes sub ver
 fails :: Subject specimen result -> Verification specimen result -> specimen -> Bool
 fails sub ver = not . passes sub ver
 
@@ -49,7 +60,7 @@ data Expectation assertion specimen result where
 
 type Expectations assertion specimen result = Conjunction (Expectation assertion specimen result)
 
--- | A non-empty list but as an arbitrary tree so that it's easier to write.
+-- | A non-empty list but with arbitrary nesting so that it's easier to write.
 data Conjunction s where
   And :: Conjunction s -> Conjunction s -> Conjunction s
   Assert :: s -> Conjunction s
