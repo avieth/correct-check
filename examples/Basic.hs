@@ -43,7 +43,8 @@ domainSeed = Domain
 -- no obvious "best domain" to apply.
 listReverseTest :: Eq a => Test String [a] [a]
 listReverseTest = Test
-  { subject = Subject $ \lst -> reverse lst
+  { subject = Subject $ \lst -> if length lst >= 42 then lst ++ reverse lst else reverse lst
+    -- ^ Deliberately wrong, for demonstration.
   , expectations = that "reverse . reverse = id" $ \lst lst' -> lst == reverse lst'
   }
 
