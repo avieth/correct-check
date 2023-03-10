@@ -6,6 +6,7 @@ module Strategy where
 -- they respect an ordering.
 
 import Data.Maybe (fromMaybe)
+import Data.Word
 import Composite
 import Check
 import Pretty
@@ -98,24 +99,27 @@ domain = Domain
     gen :: Arbitrary ((), Natural)
     gen = (,) () <$> genNatural 0 (2^32)
 
-localConfig :: LocalConfig
-localConfig = defaultLocalConfig
-  { localParallelism = nCapabilities
-  , localRandomSamples = 1024 * 4096
-  }
-
+linear :: SearchDef () Natural
 linear = linearSearchDef 1 0 upperBound
 
+quadratic :: SearchDef () Natural
+quadratic = powerSearchDef 2 0 upperBound
+
 upperBound :: Natural
-upperBound = fromIntegral (maxBound :: Int)
+upperBound = fromIntegral (maxBound :: Word32)
 
 main :: IO ()
 main = do
   result <- composite defaultGlobalConfig $
-    declare renderTestViaPretty "Linear search complication"   (static (testComplication   ordPartialOrder linear)) $ \complication ->
-    declare renderTestViaPretty "Linear search simplification" (static (testSimplification ordPartialOrder linear)) $ \simplification ->
+    declare renderTestViaPretty "Linear search complication"   (static (testComplication   ordPartialOrder linear)) $ \linearComplication ->
+    declare renderTestViaPretty "Linear search simplification" (static (testSimplification ordPartialOrder linear)) $ \linearSimplification ->
+    declare renderTestViaPretty "Quadratic search complication"   (static (testComplication   ordPartialOrder quadratic)) $ \quadraticComplication ->
+    declare renderTestViaPretty "Quadratic search simplification" (static (testSimplification ordPartialOrder quadratic)) $ \quadraticSimplification ->
     compose $ do
-      check (inParallel 4096) renderDomainViaPretty complication domain
-      check (inParallel 4096) renderDomainViaPretty simplification domain
+      let nsamples = 20 * fromIntegral (maxBound :: Word16)
+      check (serially nsamples) renderDomainViaPretty linearComplication domain
+      check (serially nsamples) renderDomainViaPretty linearSimplification domain
+      check (serially nsamples) renderDomainViaPretty quadraticComplication domain
+      check (serially nsamples) renderDomainViaPretty quadraticSimplification domain
       pure ()
   printTestResult result
