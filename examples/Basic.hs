@@ -63,7 +63,7 @@ main = do
   -- Now a composite test. Each test we use must be made into a static pointer,
   -- which helps to ensure it is actually reproducible, i.e. it doesn't have
   -- any hidden state in its closure.
-  result <- composite (asynchronousChecks 2 defaultGlobalConfig) $
+  result <- composite (allowAsynchronousChecks 2 defaultGlobalConfig) $
     -- Important to render via show, because the pretty instance is defined by
     -- showSeedHex, which is under test.
     declare renderTestViaShow "Rountrip Seed Hex" (static roundtripSeedHex) $ \roundtripSeedHex ->
@@ -77,10 +77,14 @@ main = do
       -- the test itself is static.
       let intDomain :: Domain Natural [Int]
           intDomain = Domain (linearStrategy 10 0 256) (listOf parameter (fromIntegral <$> genInteger 0 4096))
-      async1 <- checkAsync (serially 64) renderDomainViaPretty listReverse intDomain
-      async2 <- checkAsync (inParallel 1024) renderDomainViaPretty roundtripSeedHex domainSeed
+      _ <- check (serially 64) renderDomainViaPretty listReverse intDomain
+      -- It's possible to opt-in to running the check in the background while
+      -- the IO continues. This can be useful when searching large domains
+      -- over expensive tests: the rest of the composite test does not need to
+      -- stop and wait for it.
+      async <- checkAsync (inParallel 1024) renderDomainViaPretty roundtripSeedHex domainSeed
       unitTest (assertTrue "2plus2" (2 + 2 == 4))
-      b1 <- awaitCheck async1
+      b <- awaitCheck async
       -- Don't _need_ to await a check in order for it to finish, but it can
       -- still be useful for coordination, and also if you want to know whether
       -- it passed.

@@ -44,7 +44,7 @@ module Composite
   , inParallel
   , GlobalConfig (..)
   , defaultGlobalConfig
-  , asynchronousChecks
+  , allowAsynchronousChecks
   , Parallelism (..)
   , noParallelism
   , nCapabilities
@@ -542,8 +542,8 @@ defaultGlobalConfig = GlobalConfig
   , asynchronousCheckThreads = Nothing
   }
 
-asynchronousChecks :: Natural -> GlobalConfig -> GlobalConfig
-asynchronousChecks n gconf = gconf { asynchronousCheckThreads = Just n }
+allowAsynchronousChecks :: Natural -> GlobalConfig -> GlobalConfig
+allowAsynchronousChecks n gconf = gconf { asynchronousCheckThreads = Just n }
 
 data AsyncCheckEnv where
   NoAsyncChecks :: AsyncCheckEnv
