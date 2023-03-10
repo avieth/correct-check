@@ -244,6 +244,15 @@ This general definition admits good shrinking or bad shrinking, depending on
 the definition of its arguments, and how they respond to the complexity-ordered
 `param`.
 
+#### Unbounded numbers
+
+With QuickCheck and Hedgehog generators, it's not obvious how to call for some
+number without imposing an upper bound. In this project, a generator can take an
+`Integer` or `Natural` from the search space, without giving an upper bound,
+leaving that to be decided by a search strategy. This seems like a better
+separation of concerns. It ought to be easier to write more widely-applicable
+and re-usable generators.
+
 ### Unit tests and simplification
 
 A unit test is a special case of a property test in which the domain is the
