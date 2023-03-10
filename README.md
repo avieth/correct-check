@@ -183,7 +183,7 @@ Ended normally
 ```
 
 Example output is from a deliberately wrong list reverse definition. See
-(examples/Basic.hs).
+[Basic](./examples/Basic.hs).
 
 ## Some other interesting things
 
