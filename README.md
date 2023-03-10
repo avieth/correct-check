@@ -71,7 +71,10 @@ data Test assertion specimen result = Test
 
 data Expectation assertion specimen result = Expectation
   { assertion :: assertion
+  -- ^ Just a label
   , verification :: specimen -> result -> Bool
+  -- ^ The subject of a test gives a functional relation (specimen, result), and
+  -- this function identifies a subset of that relation (the passing subset).
   }
 
 type Conjunction = NonEmpty
@@ -107,11 +110,12 @@ data Counterexample space specimen result assertion = Counterexample
 
 ## Composite tests
 
-`Test`s and `Domain` is all we need to be able to do QuickCheck-style property
+`Test`s and `Domain`s are all we need to be able to do QuickCheck-style property
 testing.
 
 ```Haskell
--- Is in IO because it conjures a new random seed.
+-- Is in IO because it conjures a new random seed and forces the result of
+-- the test with `evaluate` and `try`.
 quickCheck :: Natural -- How many samples to check.
            -> Test assertion specimen result
            -> Domain space specimen
@@ -150,10 +154,11 @@ example = composite defaultGlobalConfig $
     -- A composite test may be ended early.
     unless checkPassed stop
     -- Simple, non-CPS IO can also be done in a simpler fomr
-    effect_ (putStrLn "Test complete"
+    effect_ (putStrLn "Test complete")
   where
     -- The form `static someTest` used in the declaration will ensure that
-    -- this test may as well be a top-level declaration.
+    -- this test does not contain any hidden dynamic parts (may as well be a
+    -- top-level declaration).
     someTest :: Test () (Natural, Word32) String
     someTest = ...
 ```
@@ -178,14 +183,14 @@ Ended normally
 ```
 
 Example output is from a deliberately wrong list reverse definition. See
-[examples/Basic.hs].
+(examples/Basic.hs).
 
 ## Some other interesting things
 
 ### Static pointers
 
 This project uses [static pointers](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/static_pointers.html)
-is a way they were not intended to be used. By requiring that a test be static
+in a way they were not intended to be used. By requiring that a test be static
 in order to use it in a composite, it's ensured that the test really is
 reproducible. Here's an example
 
