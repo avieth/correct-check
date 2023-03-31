@@ -135,26 +135,28 @@ a `MonadUnliftIO` instance in an effort to make it widely and easily applicable.
 It looks like this:
 
 ```Haskell
+{-# LANGUAGE StaticPointers #-}
+
 example :: IO TestResult
-example = composite defaultGlobalConfig $
-  declare renderTestViaPretty "Some Test" (static someTest) $ \someTest ->
-  compose $ do
-    -- Shows that we can use arbitrary IO: even a continuation-passing-style
-    -- IO like bracket. Could also use a "lifted" variant via MonadUnliftIO.
-    checkPassed <- effect $ \runInIO -> bracket open closee $ \file -> runInIO $ do
-      value <- readFromFile file
-      -- A domain may depend upon a dynamic value like the thing we read from
-      -- the file. This is okay so long as know how to render it in such a way
-      -- that the generated value can be reconstructed.
-      let someDomain = makeDomain value
-          renderDomain = renderDomainViaPretty
-      -- Check at 100 samples, in parallel (using the number of capabilities).
-      check (inParallel 100) renderDomain someTest someDomain
-    -- A call to check gives a Bool indicating whether it passed.
-    -- A composite test may be ended early.
-    unless checkPassed stop
-    -- Simple, non-CPS IO can also be done in a simpler fomr
-    effect_ (putStrLn "Test complete")
+example = composite defaultGlobalConfig $ do
+  -- static is a keyword; GHC will check that someTest is closed.
+  let someTest = declare "Some test" renderTestViaPretty (static someTest)
+  -- Shows that we can use arbitrary IO: even a continuation-passing-style
+  -- IO like bracket. Could also use a "lifted" variant via MonadUnliftIO.
+  checkPassed <- effect $ \runInIO -> bracket open close $ \file -> runInIO $ do
+    value <- readFromFile file
+    -- A domain may depend upon a dynamic value like the thing we read from
+    -- the file. This is okay so long as know how to render it in such a way
+    -- that the generated value can be reconstructed.
+    let someDomain = makeDomain value
+        renderDomain = renderDomainViaPretty
+    -- Check at 100 samples, in parallel (using the number of capabilities).
+    check (inParallel 100) renderDomain someTest someDomain
+  -- A call to check gives a Bool indicating whether it passed.
+  -- A composite test may be ended early.
+  unless checkPassed stop
+  -- Simple, non-CPS IO can also be done in a simpler fomr
+  effect_ (putStrLn "Test complete")
   where
     -- The form `static someTest` used in the declaration will ensure that
     -- this test does not contain any hidden dynamic parts (may as well be a
@@ -204,9 +206,10 @@ main = do
         { subject = \str -> (str, lines contents)
         , expectations = that "it is a line in the file" (\(str, lns) -> str `elem` lns)
         }
-  -- `static test` will be rejected because it's not a closed form.
-  declare renderTestViaPretty "Lines" (static test) $ \someTest ->
-    compose $ pure ()
+      -- `static test` will be rejected because it's not a closed form.
+      someTest = declare "Linex" renderTestViaPretty (static test)
+  composite defaultGLobalConfig $ check (inParallel 100) renderDomain someTest someDomain
+  pure ()
 ```
 
 Instead, the programmer must rethink the definition of the test. One way forward

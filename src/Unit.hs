@@ -11,9 +11,12 @@ module Unit
   ( -- * Unit Test and Domain
     unitTest
   , unitDomain
-  , withUnitTest
   , Assertion (..)
   , Result (..)
+
+  -- * Use in composite tests
+  , unitTestDeclaration
+  , checkUnitTest
 
     -- * hunit style assertions
   , assertFailure
@@ -29,7 +32,6 @@ module Unit
 
 import Control.Exception (Exception, try)
 import Composite
-import Location
 import Pretty
 import Space
 import Types hiding (Assertion (..))
@@ -101,20 +103,11 @@ unitDomain assertion = Domain
   , generate = pure assertion
   }
 
--- | Declares unit test and gives a canonical way to run it: use the
--- 'unitDomain' and only one random seed.
---
--- Although this may be useful in practice, it probably will not lead to a
--- reproducible test.
-{-# INLINE withUnitTest #-}
-withUnitTest :: HasCallStack
-             => ((HasCallStack => Assertion -> Composite check Bool) -> Declaration check)
-             -> Declaration check
-withUnitTest k = withFrozenCallStack (declare renderTestViaPretty "Unit" (static unitTest) $ \runHUnit ->
-  -- Freeze the call stack in the continuation as well, so that check will use
-  -- the one from k, which will stand in as the `check` function inside the
-  -- composite.
-  k (\assertion -> withFrozenCallStack (check (serially 1) renderDomainViaPretty runHUnit (unitDomain assertion))))
+unitTestDeclaration :: TestDeclaration Assertion
+unitTestDeclaration = declare "HUnit" renderTestViaPretty (static unitTest)
+
+checkUnitTest :: Assertion -> Composite Bool
+checkUnitTest assertion = check (serially 1) renderDomainViaPretty unitTestDeclaration (unitDomain assertion)
 
 -- One thing to note about these HUnit tests is that the content of the test
 -- itself is always trivial (except maybe in the 'assertEqual' case, which does
@@ -153,15 +146,15 @@ withUnitTest k = withFrozenCallStack (declare renderTestViaPretty "Unit" (static
 -- always appear in composites, and they would take an HUnit runner as an
 -- argument.
 
-shouldReturn :: (Eq a, Pretty a) => (Assertion -> Composite check r) -> IO a -> a -> Composite check r
+shouldReturn :: (Eq a, Pretty a) => (Assertion -> Composite r) -> IO a -> a -> Composite r
 shouldReturn hunit io expected = effect_ io >>= \actual ->
   hunit (assertEqual "" actual expected)
 
-shouldNotReturn :: (Eq a, Pretty a) => (Assertion -> Composite check r) -> IO a -> a -> Composite check r
+shouldNotReturn :: (Eq a, Pretty a) => (Assertion -> Composite r) -> IO a -> a -> Composite r
 shouldNotReturn hunit io expected = effect_ io >>= \actual ->
   hunit (assertTrue "" (actual /= expected))
 
-shouldThrow :: (Exception e) => (Assertion -> Composite check r) -> IO a -> (e -> Bool) -> Composite check r
+shouldThrow :: (Exception e) => (Assertion -> Composite r) -> IO a -> (e -> Bool) -> Composite r
 shouldThrow hunit io p = effect_ (try io) >>= \r -> case r of
   Right _ -> hunit (assertFailure "did not get expected excetion")
   Left e -> hunit (assertTrue "predicate failed on expected exception" (p e))

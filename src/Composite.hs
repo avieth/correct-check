@@ -17,13 +17,12 @@
 
 module Composite
   ( -- * Declaring tests
-    Declaration
-  , composite
+    TestDeclaration
   , declare
-  , compose
 
     -- * Composing tests
   , Composite
+  , composite
   , effect
   , effect_
   , check
@@ -167,23 +166,23 @@ commute (Right (Just t)) = Just (Right t)
 -- | Well get this as the result of a composite test run.
 --
 -- The initial seed, the final check state, and an exception if there was one.
-data TestResult where
-  Normal :: Seed -> CheckState -> TestResult
-  Exceptional :: Seed -> CheckState -> SomeException -> TestResult
+data TestResult t where
+  Normal :: Seed -> CheckState -> t -> TestResult t
+  Exceptional :: Seed -> CheckState -> SomeException -> TestResult t
 
 -- | To stdout.
-printTestResult :: TestResult -> IO ()
+printTestResult :: TestResult t -> IO ()
 printTestResult = hPrintTestResult stdout
 
-hPrintTestResult :: Handle -> TestResult -> IO ()
+hPrintTestResult :: Handle -> TestResult t -> IO ()
 hPrintTestResult h result = do
   let doc = ppTestResult result
   b <- hSupportsANSIColor h
   if b then PP.Ansi.hPutDoc h doc else PP.Text.hPutDoc h doc
 
-ppTestResult :: TestResult -> Doc AnsiStyle
+ppTestResult :: TestResult t -> Doc AnsiStyle
 ppTestResult tresult = case tresult of
-  Normal seed state -> PP.vsep
+  Normal seed state _ -> PP.vsep
     [ ppSummary seed state
     , ppNormalFooter
     , PP.line
@@ -302,167 +301,155 @@ ppMaybe mPp t = case mPp of
   Nothing -> fromString "< cannot print  >"
   Just k -> k t
 
--- | A composite is able to call some function that will run a test over a
--- given domain and static point.
---
--- The check gives a bool saying whether it passed, which allows for a
--- composite to choose to exit early.
---
--- The parameter `check` will be instantiated at `Check`, but will appear
--- universally quantified during construction.
-newtype Composite check t = Composite
-  { runComposite ::
-         AsyncCheckEnv
-      -> (forall space specimen .
-              MaybeSrcLoc -- Of the call site to this check in the composite
-           -> LocalConfig
-           -> RenderDomain space
-           -> check specimen
-           -> Domain space specimen -- The domain to use
-           -> IO Bool
-         )
-      -> IO t
-  }
+-- | A composite property test: global configuration and some mutable state.
+newtype Composite t = Composite
+  { runComposite :: GlobalConfig -> Env -> TVar CheckState -> AsyncCheckEnv -> IO t }
 
-instance Functor (Composite property) where
-  fmap f (Composite k) = Composite (\mq l -> fmap f (k mq l))
+instance Functor Composite where
+  {-# INLINE fmap #-}
+  fmap f (Composite k) = Composite (\gc env cs ace -> fmap f (k gc env cs ace))
 
-instance Applicative (Composite property) where
-  pure x = Composite (\_ _ -> pure x)
+instance Applicative Composite where
+  {-# INLINE pure #-}
+  pure x = Composite (\_ _ _ _ -> pure x)
   (<*>) = ap
 
-instance Monad (Composite property) where
+instance Monad Composite where
   return = pure
-  Composite left >>= k = Composite (\mq l -> left mq l >>= runCompositeAt mq l . k)
+  {-# INLINE (>>=) #-}
+  Composite left >>= k = Composite (\gc env cs ace -> left gc env cs ace >>= runCompositeAt gc env cs ace . k)
 
 -- MonadIO and MonadUnliftIO are given, to make it easier to write composites:
 -- there's already a wide variety of "lifted" variants of things out there.
 
-instance Lift.MonadIO (Composite property) where
+instance Lift.MonadIO Composite where
   {-# INLINE liftIO #-}
-  liftIO io = Composite $ \_ _ -> io
+  liftIO io = Composite $ \_ _ _ _ -> io
 
-instance Unlift.MonadUnliftIO (Composite property) where
+instance Unlift.MonadUnliftIO Composite where
   {-# INLINE withRunInIO #-}
-  withRunInIO k = Composite $ \mq l -> k (runCompositeAt mq l)
+  withRunInIO k = Composite $ \gc env cs ace -> k (runCompositeAt gc env cs ace)
 
 {-# INLINE effect #-}
-effect :: ((forall r . Composite property r -> IO r) -> IO t) -> Composite property t
+effect :: ((forall r . Composite r -> IO r) -> IO t) -> Composite t
 effect = Unlift.withRunInIO
 
 {-# INLINE effect_ #-}
-effect_ :: IO t -> Composite property t
+effect_ :: IO t -> Composite t
 effect_ = Lift.liftIO
 
--- | Flipped 'runComposite'.
+-- | 'runComposite' but in different argument order.
 {-# INLINE runCompositeAt #-}
-runCompositeAt ::
-     AsyncCheckEnv
-  -> (forall space specimen .
-          MaybeSrcLoc
-       -> LocalConfig
-       -> RenderDomain space
-       -> check specimen
-       -> Domain space specimen
-       -> IO Bool
-     )
-  -> Composite check t
-  -> IO t
-runCompositeAt mq k comp = runComposite comp mq k
+runCompositeAt :: GlobalConfig -> Env -> TVar CheckState -> AsyncCheckEnv -> Composite t -> IO t
+runCompositeAt gc env cs ace comp = runComposite comp gc env cs ace
 
--- | The `check` parameter of 'Composite' will be instantiated to this in
--- order to run a composite test.
+-- | Run a composite with a given configuration.
 --
--- There is the static environment, the global configuration, both of which come
--- from the driver and not from the local test declaration.
+-- An initial random seed is chosen at random.
+composite :: GlobalConfig -> Composite t -> IO (TestResult t)
+composite gconf comp = Random.newSeedIO >>= \seed -> compositeWithSeed gconf seed comp
+
+-- | Run a composite with a given configuration and initial seed.
 --
--- The MaybeSrcLoc is the place where the check was called in the composite (not
--- where it was declared).
-newtype Check specimen = Check
-  { runCheck :: forall space .
-                MaybeSrcLoc
-             -> TVar CheckState
-             -> ResolvedConfig
-             -> RenderDomain space
-             -> Domain space specimen
-             -> IO Bool
-  }
+-- In general, a composite won't be reproducible, since it's I/O. This definition
+-- is therefore not likely to be useful aside from supporting the definition of
+-- 'composite'.
+compositeWithSeed :: GlobalConfig -> Seed -> Composite t -> IO (TestResult t)
+compositeWithSeed gconf seed comp = do
+  env <- mkEnv
+  cs <- initialCheckStateIO seed
+  outcome <- withAsynchronousChecks (asynchronousCheckThreads gconf) $ \ace ->
+    try (runComposite comp gconf env cs ace)
+  finalState <- readTVarIO cs
+  pure $ case outcome of
+    Left someException -> Exceptional seed finalState someException
+    Right t -> Normal seed finalState t
 
-{-# INLINE runCompositeCheck #-}
-runCompositeCheck :: Env
-                  -> GlobalConfig
-                  -> AsyncCheckEnv
-                  -> TVar CheckState
-                  -> Composite Check t
-                  -> IO t
-runCompositeCheck env gconf asyncEnv tvar (Composite k) =
-  k asyncEnv (\srcLoc lconf renderDomain (Check f) ->
-    -- Force the config here, in case it has a value that won't fit in Word32.
-    -- In this case we want the composite to fail early.
-    let !resolvedConfig = resolveConfig (showMaybeSrcLoc srcLoc) env gconf lconf
-     in f srcLoc tvar resolvedConfig renderDomain)
+-- | A "declared test": the Test must be closed (static), and we need some
+-- rendering information. The test specimen type is here so that we know which
+-- domains it may be applied to.
+data TestDeclaration specimen where
+  TestDeclaration :: MaybeSrcLoc
+                  -> String
+                  -> RenderTest specimen result assertion
+                  -> StaticPtr (Test assertion specimen result)
+                  -> TestDeclaration specimen
 
--- | This will check a property within a composite. It will force the evaluation
--- of the property up to the determination of whether it passes or not.
-{-# INLINE check #-}
+-- | Use the @static@ keyword on the test, and GHC will check that it's closed.
+declare :: HasCallStack
+        => String
+        -> RenderTest specimen result assertion
+        -> StaticPtr (Test assertion specimen result)
+        -> TestDeclaration specimen
+declare name render = TestDeclaration (srcLocOf callStack) name render
+
+-- | Check a property within a composite. The 'Test' comes from a
+-- 'TestDeclaration' declared and is therefore closed (static), and so it is
+-- identifiable and reproducible.
 check :: HasCallStack
       => LocalConfig
       -> RenderDomain space
-      -> check specimen
+      -> TestDeclaration specimen
       -> Domain space specimen
-      -> Composite check Bool
-check lconf render check domain = Composite $ \_ k ->
-  k (srcLocOf callStack) lconf render check domain
+      -> Composite Bool
+check lconf render staticTest domain = Composite $ \gc env cs _ace ->
+  checkOne lconf render staticTest domain (srcLocOf callStack) gc env cs
 
--- | Used to restrict the form of composite tests. The function 'composite'
--- will eliminate this constructor, but requires that the type parameter
--- `check` be universally quanitified (similar to the ST trick).
-newtype Declaration check = Declaration
-  { runDeclaration ::
-         (forall specimen .
-           Check specimen -> check specimen
-         )
-      -> Composite check ()
-  }
-
--- INLINEs on compose, declare, and composite are very important. Without it,
--- GHC won't be able to simplify unit tests in composites.
-
-{-# INLINE CONLIKE compose #-}
-compose :: Composite check () -> Declaration check
-compose comp = Declaration (\_ -> comp)
-
--- | Declare a property, to allow for its use in a composite.
+-- | Like 'check' but will do it in the background if the composite is
+-- configured with async checks enabled.
 --
--- The test must be inside a StaticPtr. That's key if we want reproducibility.
--- This is the only place where it is enforced; it is `deRefStaticPtr`d here.
-{-# INLINE CONLIKE declare #-}
-declare :: HasCallStack
-        => RenderTest specimen result assertion
-        -> String
-        -> StaticPtr (Test assertion specimen result)
-        -> (check specimen -> Declaration check)
-        -> Declaration check
-declare renderTest name test k = Declaration $ \toCheck -> runDeclaration
-  (k (toCheck (Check (checkOne name (srcLocOf callStack) (deRefStaticPtr test) renderTest)))) toCheck
+-- Unlike typical async, if you don't await it, it (should be) is still
+-- guaranteed to complete, and it will appear in the reslting check state.
+--
+-- To get that guarantee, this function will block until it knows that some
+-- thread is going to pick up its queued check without ever having to enter into
+-- an interruptible operation (i.e. an STM retry). That's done by way of an STM
+-- semaphore. This call will block if there are too many other async checks
+-- in progress (more than the amount of configured async check concurrency).
+-- This also ensures that the backing TQueue is bounded in length.
+checkAsync :: HasCallStack
+           => LocalConfig
+           -> RenderDomain space
+           -> TestDeclaration specimen
+           -> Domain space specimen
+           -> Composite AsyncCheck
+checkAsync lconf render staticTest domain = Composite $ \gc env cs ace -> case ace of
+  -- Wanted an async check, but no concurrency available. Check it here.
+  NoAsyncChecks -> do
+    b <- checkOne lconf render staticTest domain (srcLocOf callStack) gc env cs
+    pure $ AsyncCheck (pure b)
+  -- Concurrency is available: throw the check into the queue, to fill the
+  -- TMVar when it finishes.
+  AsyncChecks tsem tqueue -> do
+    tmvar <- newEmptyTMVarIO
+    let qcheck = QueuedCheck $ do
+          -- It is assumed that the check runniner `k` will evaluate the result
+          -- and catch pure exceptions, so we don't need to do that here.
+          b <- checkOne lconf render staticTest domain (srcLocOf callStack) gc env cs
+          pure (putTMVar tmvar b)
+    -- Enqueue the check, but then wait until some worker has signalled that
+    -- they're going to pick it up.
+    -- See 'clearQueue' where the opposite order happens.
+    atomically (writeTQueue tqueue qcheck)
+    atomically (waitTSem tsem)
+    pure $ AsyncCheck (readTMVar tmvar)
 
--- | Takes the source location of the declaration, and also of the call to
--- check/assert.
-{-# INLINE checkOne #-}
-checkOne :: String -- ^ Name of the declaration
-         -> MaybeSrcLoc -- ^ Location of the declaration
-         -> Test assertion specimen result
-         -> RenderTest specimen result assertion
-         -> MaybeSrcLoc -- ^ Location of the call to check within the Composite
-         -> TVar CheckState
-         -> ResolvedConfig
+-- | Used in the definition of 'check' and 'checkOne'.
+checkOne :: LocalConfig
          -> RenderDomain space
+         -> TestDeclaration specimen -- ^ The test to check
          -> Domain space specimen
+         -> MaybeSrcLoc -- ^ Location of the call to 'check' or 'checkAsync'
+         -> GlobalConfig -- ^ From the Composite
+         -> Env -- ^ From the Composite
+         -> TVar CheckState -- ^ From the Composite
          -> IO Bool
-checkOne name declSrcLoc test renderTest checkSrcLoc tvar rconf renderDomain domain = do
-  seed <- atomically (splitStateSeed tvar)
-  -- ResolvedConfig should ensure n > 1.
-  let n = resolvedRandomSamples rconf
+checkOne lconf renderDomain (TestDeclaration declSrcLoc name renderTest stest) domain checkSrcLoc gconf env cs = do
+  let test = deRefStaticPtr stest
+  seed <- atomically (splitStateSeed cs)
+  let rconf = resolveConfig (showMaybeSrcLoc checkSrcLoc) env gconf lconf
+      -- ResolvedConfig should ensure n > 1.
+      n = resolvedRandomSamples rconf
       m = resolvedParallelism rconf
       result = case m > 1 of
         False -> checkSequential (randomPoints (n - 1) seed) domain test
@@ -471,25 +458,10 @@ checkOne name declSrcLoc test renderTest checkSrcLoc tvar rconf renderDomain dom
   -- error call, etc.).
   outcome <- try (evaluate result)
   atomically $ do
-    addPropertyTestResult name declSrcLoc checkSrcLoc renderTest renderDomain tvar outcome
-    modifyTVar' tvar incrementCheckCount
+    addPropertyTestResult name declSrcLoc checkSrcLoc renderTest renderDomain cs outcome
+    modifyTVar' cs incrementCheckCount
   -- Exceptions are considered test failures.
   pure $! isNothing (commute outcome)
-
--- | Run a composite. Note the ST-style trick: only composites which do not
--- know anythig about the `property` type may be run.
-{-# INLINE composite #-}
-composite :: GlobalConfig -> (forall check . Declaration check) -> IO TestResult
-composite gconf decl = do
-  env <- mkEnv
-  initialSeed <- Random.newSeedIO
-  tvar <- initialCheckStateIO initialSeed
-  outcome <- withAsynchronousChecks (asynchronousCheckThreads gconf) $ \mq ->
-    try (runCompositeCheck env gconf mq tvar (runDeclaration decl id))
-  finalState <- readTVarIO tvar
-  pure $ case outcome of
-    Left someException -> Exceptional initialSeed finalState someException
-    Right () -> Normal initialSeed finalState
 
 -- | A test will run all properties, even if some property has failed. It's
 -- possible to stop the property test eary by throwing an exception. The check
@@ -504,12 +476,12 @@ instance Show StopTestEarly where
 instance Exception StopTestEarly
 
 {-# INLINE stop #-}
-stop :: HasCallStack => Composite check x
-stop = Composite $ \_ _ -> throwIO (StopTestEarly "stop test" (srcLocOf callStack))
+stop :: HasCallStack => Composite x
+stop = Composite $ \_ _ _ _ -> throwIO (StopTestEarly "stop test" (srcLocOf callStack))
 
 {-# INLINE stopBecause #-}
-stopBecause :: HasCallStack => String -> Composite check x
-stopBecause str = Composite $ \_ _ -> throwIO (StopTestEarly str (srcLocOf callStack))
+stopBecause :: HasCallStack => String -> Composite x
+stopBecause str = Composite $ \_ _ _ _ -> throwIO (StopTestEarly str (srcLocOf callStack))
 
 data Env = Env
   { envCapabilities :: !Word32
@@ -557,9 +529,7 @@ data AsyncCheckEnv where
 -- They will block on STM retry when the queue is empty. Since the checks are
 -- pure functions, they are not interruptible, but the STM retry is. So in case
 -- the queue is empty, the withAsync call be able to kill the thread.
-withAsynchronousChecks :: Maybe Natural
-                       -> (AsyncCheckEnv -> IO t)
-                       -> IO t
+withAsynchronousChecks :: Maybe Natural -> (AsyncCheckEnv -> IO t) -> IO t
 withAsynchronousChecks conf k = case atLeastOne of
    Nothing -> k NoAsyncChecks
    -- We know it's greater than one so we're good to go.
@@ -589,51 +559,11 @@ newtype QueuedCheck = QueuedCheck { runQueuedCheck :: IO (STM ()) }
 -- | What is given in the composite by an asynchronous check.
 --
 -- The STM will block until the test is done and the result is known.
-newtype AsyncCheck check = AsyncCheck { asyncCheckVar :: STM Bool }
+newtype AsyncCheck = AsyncCheck { asyncCheckVar :: STM Bool }
 
 {-# INLINE awaitCheck #-}
-awaitCheck :: AsyncCheck check -> Composite check Bool
+awaitCheck :: AsyncCheck -> Composite Bool
 awaitCheck = effect_ . atomically . asyncCheckVar
-
--- | Like 'check' but will do it in the background if the composite is
--- configured with async checks enabled.
---
--- Unlike typical async, if you don't await it, it (should be) is still
--- guaranteed to complete, and it will appear in the reslting check state.
---
--- To get that guarantee, this function will block until it knows that some
--- thread is going to pick up its queued check without ever having to enter into
--- an interruptible operation (i.e. an STM retry). That's done by way of an STM
--- semaphore. This call will block if there are too many other async checks
--- in progress (more than the amount of configured async check concurrency).
--- This also ensures that the backing TQueue is bounded in length.
-{-# INLINE checkAsync #-}
-checkAsync :: HasCallStack
-           => LocalConfig
-           -> RenderDomain space
-           -> check specimen
-           -> Domain space specimen
-           -> Composite check (AsyncCheck check)
-checkAsync lconf renderDomain check domain = Composite $ \mqueue k -> case mqueue of
-  -- Wanted an async check, but no concurrency available. Check it here.
-  NoAsyncChecks -> do
-    b <- k (srcLocOf callStack) lconf renderDomain check domain
-    pure $ AsyncCheck (pure b)
-  -- Concurrency is available: throw the check into the queue, to fill the
-  -- TMVar when it finishes.
-  AsyncChecks tsem tqueue -> do
-    tmvar <- newEmptyTMVarIO
-    let qcheck = QueuedCheck $ do
-          -- It is assumed that the check runniner `k` will evaluate the result
-          -- and catch pure exceptions, so we don't need to do that here.
-          b <- k (srcLocOf callStack) lconf renderDomain check domain
-          pure (putTMVar tmvar b)
-    -- Enqueue the check, but then wait until some worker has signalled that
-    -- they're going to pick it up.
-    -- See 'clearQueue' where the opposite order happens.
-    atomically (writeTQueue tqueue qcheck)
-    atomically (waitTSem tsem)
-    pure $ AsyncCheck (readTMVar tmvar)
 
 -- | Runs checks from the queue.
 --

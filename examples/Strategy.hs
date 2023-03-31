@@ -108,18 +108,25 @@ quadratic = powerSearchDef 2 0 upperBound
 upperBound :: Natural
 upperBound = fromIntegral (maxBound :: Word32)
 
+linearComplication :: TestDeclaration (Point () Natural)
+linearComplication = declare "Linear search complication" renderTestViaPretty (static (testComplication ordPartialOrder linear))
+
+linearSimplification :: TestDeclaration (Point () Natural)
+linearSimplification = declare "Linear search simplification" renderTestViaPretty (static (testSimplification ordPartialOrder linear))
+
+quadraticComplication :: TestDeclaration (Point () Natural)
+quadraticComplication = declare "Quadratic search complication" renderTestViaPretty (static (testComplication ordPartialOrder quadratic))
+
+quadraticSimplification :: TestDeclaration (Point () Natural)
+quadraticSimplification = declare "Quadratic search simplification" renderTestViaPretty (static (testSimplification ordPartialOrder quadratic))
+
 main :: IO ()
 main = do
-  result <- composite defaultGlobalConfig $
-    declare renderTestViaPretty "Linear search complication"   (static (testComplication   ordPartialOrder linear)) $ \linearComplication ->
-    declare renderTestViaPretty "Linear search simplification" (static (testSimplification ordPartialOrder linear)) $ \linearSimplification ->
-    declare renderTestViaPretty "Quadratic search complication"   (static (testComplication   ordPartialOrder quadratic)) $ \quadraticComplication ->
-    declare renderTestViaPretty "Quadratic search simplification" (static (testSimplification ordPartialOrder quadratic)) $ \quadraticSimplification ->
-    compose $ do
-      let nsamples = 20 * fromIntegral (maxBound :: Word16)
-      check (serially nsamples) renderDomainViaPretty linearComplication domain
-      check (serially nsamples) renderDomainViaPretty linearSimplification domain
-      check (serially nsamples) renderDomainViaPretty quadraticComplication domain
-      check (serially nsamples) renderDomainViaPretty quadraticSimplification domain
-      pure ()
+  result <- composite defaultGlobalConfig $ do
+    let nsamples = 20 * fromIntegral (maxBound :: Word16)
+    check (serially nsamples) renderDomainViaPretty linearComplication domain
+    check (serially nsamples) renderDomainViaPretty linearSimplification domain
+    check (serially nsamples) renderDomainViaPretty quadraticComplication domain
+    check (serially nsamples) renderDomainViaPretty quadraticSimplification domain
+    pure ()
   printTestResult result

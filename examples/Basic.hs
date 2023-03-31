@@ -48,6 +48,11 @@ listReverseTest = Test
   , expectations = that "reverse . reverse = id" $ \lst lst' -> lst == reverse lst'
   }
 
+-- Need to pick a type for the list reverse test, in order to be able to
+-- make it static.
+listReverse :: TestDeclaration [Int]
+listReverse = declare "List reverse" renderTestViaPretty (static (listReverseTest @Int))
+
 main :: IO ()
 main = do
   -- quickCheck the seed roundtrip. Could be useful in GHCi.
@@ -63,30 +68,25 @@ main = do
   -- Now a composite test. Each test we use must be made into a static pointer,
   -- which helps to ensure it is actually reproducible, i.e. it doesn't have
   -- any hidden state in its closure.
-  result <- composite (allowAsynchronousChecks 2 defaultGlobalConfig) $
+  result <- composite (allowAsynchronousChecks 2 defaultGlobalConfig) $ do
+    -- A domain can be made dynamically, with IO; the important thing is that
+    -- the test itself is static.
+    let intDomain :: Domain Natural [Int]
+        intDomain = Domain (linearStrategy 10 0 256) (listOf parameter (fromIntegral <$> genInteger 0 4096))
+    _ <- check (serially 64) renderDomainViaPretty listReverse intDomain
+    -- It's possible to opt-in to running the check in the background while
+    -- the IO continues. This can be useful when searching large domains
+    -- over expensive tests: the rest of the composite test does not need to
+    -- stop and wait for it.
     -- Important to render via show, because the pretty instance is defined by
     -- showSeedHex, which is under test.
-    declare renderTestViaShow "Rountrip Seed Hex" (static roundtripSeedHex) $ \roundtripSeedHex ->
-    -- Some generic hunit style unit testing, just to show how it can be done.
-    withUnitTest $ \unitTest ->
-    -- Need to pick a type for the list reverse test, in order to be able to
-    -- make it static.
-    declare renderTestViaPretty "List reverse" (static (listReverseTest @Int)) $ \listReverse ->
-    compose $ do
-      -- A domain can be made dynamically, with IO; the important thing is that
-      -- the test itself is static.
-      let intDomain :: Domain Natural [Int]
-          intDomain = Domain (linearStrategy 10 0 256) (listOf parameter (fromIntegral <$> genInteger 0 4096))
-      _ <- check (serially 64) renderDomainViaPretty listReverse intDomain
-      -- It's possible to opt-in to running the check in the background while
-      -- the IO continues. This can be useful when searching large domains
-      -- over expensive tests: the rest of the composite test does not need to
-      -- stop and wait for it.
-      async <- checkAsync (inParallel 1024) renderDomainViaPretty roundtripSeedHex domainSeed
-      unitTest (assertTrue "2plus2" (2 + 2 == 4))
-      b <- awaitCheck async
-      -- Don't _need_ to await a check in order for it to finish, but it can
-      -- still be useful for coordination, and also if you want to know whether
-      -- it passed.
-      pure ()
+    let declaredRoundtripSeedHex :: TestDeclaration Seed
+        declaredRoundtripSeedHex = declare "Rountrip Seed Hex" renderTestViaShow (static roundtripSeedHex)
+    async <- checkAsync (inParallel 1024) renderDomainViaPretty declaredRoundtripSeedHex domainSeed
+    checkUnitTest (assertTrue "2plus2" (2 + 2 == 4))
+    b <- awaitCheck async
+    -- Don't _need_ to await a check in order for it to finish, but it can
+    -- still be useful for coordination, and also if you want to know whether
+    -- it passed.
+    pure ()
   printTestResult result
